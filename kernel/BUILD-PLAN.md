@@ -63,10 +63,34 @@ next is feasible; building all four without pruning is not.
 6. kernel/scripts/build.sh --profile baseline     # DONE — compiles and links (F-18)
 7.   ... boot + validate + package baseline ...   # DONE — PORTABLE_ARTIFACT_VERIFIED (F-19, F-22)
 8. kernel/scripts/build.sh --profile kasan        # DONE — builds, boots, probe passes under KASAN, 0 reports (F-20/F-21 fixed en route)
-9. kernel/scripts/build.sh --profile kcov         # DONE — builds (not yet booted)
-10. kernel/scripts/build.sh --profile debug       # not started
-11. package kasan / kcov / debug bundles          # not started
+9. kernel/scripts/build.sh --profile kcov         # DONE — builds AND boots; coverage collected (F-23)
+10. kernel/scripts/build.sh --profile debug       # NOT STARTED  <-- next
+11. package kcov / kasan / debug bundles          # PARTIAL — baseline only
 ```
+
+### Build-plan status at a glance
+
+| Step | State | Evidence |
+|---|---|---|
+| 1 codespace-setup | DONE | F-12, `kernel/BUILD-HOST.md` |
+| 2 preflight | DONE — `READY` | disk is 32 GB (one profile at a time) |
+| 3 kernel pin | DONE — 6.12.111 | F-16 records why *not* 6.18.54 |
+| 4 fetch-kernel | DONE — checksum OK | `kernel/sources/kernel.pin` |
+| 5 apply-patches | DONE — 6/6 vendor + 1 research | F-17 |
+| 6 build baseline | DONE | F-18 |
+| 7 boot/load/target + package baseline | DONE | F-19, F-22 (`PORTABLE_ARTIFACT_VERIFIED`) |
+| 8 build kasan | DONE — builds, boots, 0 KASAN reports | F-20/F-21 fixed en route |
+| 9 build kcov | DONE — builds, boots, **2882 distinct PCs** | F-23 (coverage excludes Kbase) |
+| 10 build debug | **NOT STARTED** | — |
+| 11 package remaining bundles | **PARTIAL** — only `baseline` | F-22 |
+
+**Blocking issue for the coverage profile.** F-23 shows the `kcov` kernel collects
+coverage but *none of it is Kbase* — all 2882 distinct PCs lie inside vmlinux's own
+text segment, while `mali_kbase.ko` is a module living ~2.4 GB higher. A
+coverage-guided fuzzer on this kernel would optimise kernel paths and consider every
+Kbase input equally non-productive while appearing healthy. F-2 (`MALI_KCOV` exists
+only in the Android/SCons `Mconfig`) must be closed with a research patch before
+`kcov` is useful; step 9 is therefore "builds and collects", not "usable".
 
 **Baseline first, alone.** It answers the one question everything else depends on:
 does r54p0 + the six patches + the chosen kernel compile at all? Do not build four

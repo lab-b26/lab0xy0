@@ -1052,6 +1052,70 @@ x86_64, so it is `DISCOVERY-ONLY` per DECISION-1, and no result from it is
 Arm-conforming evidence. The manifest records both fields separately so the
 portability result cannot be misread as a conformance result.
 
+## F-23 — VERIFIED: the `kcov` profile collects coverage, and that coverage **excludes Kbase** (F-2 confirmed empirically)
+
+**Status: F-2 CONFIRMED BY MEASUREMENT (not by Kconfig reading alone).** Category:
+`coverage result`. This is the first *quantitative* coverage number in the project,
+and it simultaneously proves the harness works and that the instrumentation misses
+the target.
+
+```text
+guest          kcov profile, 6.12.111, CONFIG_KCOV=y + KCOV_INSTRUMENT_ALL=y
+KCOV cycle     KCOV_INIT_TRACE(32768 words) -> KCOV_ENABLE -> fork+exec
+               kbase-probe -> read area -> KCOV_DISABLE, all on ONE fd
+records        14495 recorded PCs
+distinct PCs   2882            <-- the number a fuzzer would use as "new coverage"
+PC range       0xffffffff8103d11d - 0xffffffff812da9f5
+truncated      no (14495 << 32767)
+```
+
+**Kbase contributed zero of those 2882 PCs.** vmlinux's executable segment is
+`0xffffffff81000000–0xffffffff82dfffff` (from `readelf -lW`), and *every* observed
+PC falls inside it. `mali_kbase.ko` is a loadable module, so its text lives in the
+module/vmalloc region (`0xffffffffc0000000`+) — roughly 2.4 GB above the highest
+PC seen. No PC in that range appears, so not one instrumented Kbase instruction was
+recorded.
+
+This is F-2 (`MALI_KCOV` exists only in the Android/SCons `Mconfig`, never read by
+an in-tree build) confirmed by *behaviour* rather than by reading a Kconfig file. A
+coverage-guided fuzzer pointed at this kernel would optimise kernel-side paths and
+would treat every Kbase input as producing identical coverage — the worst possible
+failure mode, because the fuzzer would look healthy while making no progress on the
+actual target. Closing F-2 with a research patch is therefore a prerequisite for
+`kcov` being useful at all, not a nice-to-have.
+
+### KCOV's userspace protocol is genuinely counter-intuitive
+
+Four separate mistakes were made and caught only because each step reported its
+real errno. Worth recording, because every one of them fails *silently* or
+misreports:
+
+1. **KCOV is driven by `ioctl`, not `write`.** `echo 1 > /sys/kernel/debug/kcov`
+   is the intuitive thing to try and it is wrong — kcov's `file_operations` has
+   **no `.read` and no `.write` handler at all**, only `open`/`ioctl`/`mmap`/
+   `release`.
+2. **`KCOV_INIT_TRACE` takes the area size *as the ioctl argument*, not a pointer
+   to it.** The header's `_IOR('c', 1, unsigned long)` strongly implies a pointer.
+   `kcov_ioctl_locked()` does `size = arg; if (size < 2 || …) return -EINVAL;`, so
+   passing a pointer fails `-EINVAL`. It also rejects `size < 2`.
+3. **The whole cycle must share one fd.** kcov state hangs off the open file, so
+   `INIT_TRACE` on one fd and `ENABLE` on another leaves the second fd with no area
+   and `ENABLE` returns `-EINVAL`.
+4. **Counters are read by `mmap`, and the area is a PC *list*, not a bitset.**
+   `__sanitizer_cov_trace_pc()` stores the running count in `area[0]` and appends
+   each canonicalised PC at `area[pos]`. Popcounting the area — the obvious
+   approach — yields `656023` for this run: a large, entirely meaningless number
+   that reads like great coverage. The real figures are `records=14495`,
+   `distinct_pcs=2882`. `mmap` must additionally use exactly
+   `kcov->size * sizeof(long)` bytes at offset 0, or it returns `-EINVAL`.
+
+The lesson generalises past KCOV: **a coverage tool that returns a plausible wrong
+number is more dangerous than one that crashes.** Every stage here reports the real
+errno, so a misconfiguration names itself instead of producing a confident lie.
+
+Scope: DISCOVERY-ONLY per DECISION-1, as always. The number describes this
+simulator build and is not a statement about real hardware.
+
 ## Consolidated unknowns
 
 1. ~~Whether r54p0 + all six patches compiles on any x86_64 Linux kernel.~~
