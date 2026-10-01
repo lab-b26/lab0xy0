@@ -60,10 +60,10 @@ next is feasible; building all four without pruning is not.
 3. fill kernel/sources/kernel.pin       # DONE — 6.12.111 (+ why not 6.18.54)
 4. kernel/scripts/fetch-kernel.sh       # DONE — checksum verified
 5. kernel/scripts/apply-patches.sh      # DONE — 6/6 vendor + 1 research patch
-6. kernel/scripts/build.sh --profile baseline     # DONE — compiles and links
-7.   ... boot + validate + package baseline ...   # NOT STARTED  <-- next
-8. kernel/scripts/build.sh --profile kasan
-9. kernel/scripts/build.sh --profile kcov
+6. kernel/scripts/build.sh --profile baseline     # DONE — compiles and links (F-18)
+7.   ... boot + validate + package baseline ...   # PARTIAL — boot/load/target VERIFIED (F-19); packaging NOT DONE
+8. kernel/scripts/build.sh --profile kasan        # DONE — builds, boots, probe passes under KASAN, 0 reports (F-20/F-21 fixed en route)
+9. kernel/scripts/build.sh --profile kcov         # IN PROGRESS
 10. kernel/scripts/build.sh --profile debug
 11. rootfs + QEMU + artifact packaging + clean-location test
 ```
@@ -74,11 +74,23 @@ profiles in parallel on a 4-vCPU host, and do not start the instrumented variant
 until baseline works. That question is now answered: **yes, on 6.12.111** (F-18),
 after three failed attempts (F-14, F-16, F-17).
 
-Step 7 is the next real work, and it is a different kind of step: everything so
-far has been *compilation*, and no statement about the driver actually running
-has been made. `qemu/` and `qemu/rootfs/` are documentation placeholders, so
-step 7 needs a rootfs built first, then a QEMU boot, then `insmod` — and only
-after that does `KBASE_LOAD_VERIFIED` become reachable.
+Step 7 is where compilation stopped being the only claim. It is now **partially**
+done, and the split matters:
+
+- **VERIFIED (F-19):** the module *loads* (`insmod` rc=0), a GPU target
+  initialises (`arch 14.8.5` = `tDRx`), `/dev/mali0` appears, and the EL0 ioctl
+  surface answers all nine probe phases (`passed=0x1ff failed=0x000`). Evidence in
+  `../research/boot-logs/`. This required building tooling that did not exist:
+  `qemu/rootfs/build-rootfs.sh`, `qemu/scripts/{run.sh,verify-boot.sh}`, and
+  `qemu/target/kbase-probe.c`.
+- **NOT DONE:** artifact packaging and the clean-location portability test. No
+  `artifacts/<profile>/` bundle exists — `../artifacts/README.md` still reads
+  "artifacts produced: 0" — so `PORTABLE_ARTIFACT_VERIFIED` is **not** reached and
+  must not be claimed. Step 11 remains the real step 7 remainder.
+
+Per DECISION-1 all of the above is **DISCOVERY-ONLY**, and `../research/state.md`
+stays `NOT_STARTED`: the state ladder requires formal one-at-a-time checklist
+transitions, which this phase has not run.
 
 ## Step 2 — choosing the kernel version — RESOLVED, with a caveat
 

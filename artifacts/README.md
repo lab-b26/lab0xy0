@@ -130,5 +130,24 @@ artifacts produced:   0
 states reached:       none (see ../research/state.md — NOT_STARTED)
 ```
 
-This directory currently holds only this README. The first artifact is a
-build-phase deliverable.
+This directory currently holds only this README. **No artifact bundle has been
+produced yet.**
+
+This is worth being explicit about, because the *components* an artifact is made of
+already exist and have been verified — but a bundle is not the same as its parts:
+
+| Component | State | Where |
+|---|---|---|
+| `baseline` kernel + modules | compiles, links, **boots**, module loads, EL0 ioctls respond | `build/baseline/` (gitignored) |
+| `kasan` kernel + modules | same, under `CONFIG_KASAN`, zero sanitizer reports | build tree pruned; log kept |
+| rootfs | built per profile (cpio, ~2.6 MB) | `build/rootfs/` (gitignored) |
+| **`artifacts/<profile>/` bundle** | **NOT PACKAGED** | — |
+| clean-location portability test | **NOT RUN** | — |
+
+Runtime evidence for the components is in `../research/boot-logs/` and F-19 of
+`../analysis/findings.md`. Note that a component being `TARGET_VERIFIED` says
+nothing about an artifact being portable — the whole point of the procedure above
+is that the bundle is tested *away from the build tree*, which has not happened.
+
+Packaging is the remaining half of build-plan step 7 (see `../kernel/BUILD-PLAN.md`).
+Until it is done, the honest status line above stays at 0.
