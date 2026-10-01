@@ -81,8 +81,30 @@ next is feasible; building all four without pruning is not.
 | 7 boot/load/target + package baseline | DONE | F-19, F-22 (`PORTABLE_ARTIFACT_VERIFIED`) |
 | 8 build kasan | DONE — builds, boots, 0 KASAN reports | F-20/F-21 fixed en route |
 | 9 build kcov | DONE — builds, boots, **2882 distinct PCs** | F-23 (coverage excludes Kbase) |
-| 10 build debug | **NOT STARTED** | — |
-| 11 package remaining bundles | **PARTIAL** — only `baseline` | F-22 |
+| 10 build debug | **DONE** — builds, boots 5/5, DWARF5 confirmed in `vmlinux` | F-24 (`DEBUG_INFO` unsatisfiable), F-27 (`MALI_KUTF` breaks the build) |
+| 11 package remaining bundles | **PARTIAL** — `baseline` portable, `kcov` + `debug` at `TARGET_VERIFIED`, `kasan` absent | F-22 (procedure), P5 (clean-location) |
+
+**All four profiles now compile and boot.** Three findings came out of step 10
+alone, and all three are the same shape — a line in a fragment or a header that was
+accepted by the tooling and then did something other than what it said:
+
+- **F-24** `CONFIG_DEBUG_INFO=y` is *unsatisfiable*: the symbol is a prompt-less
+  derived `bool`, so no fragment can set it. Replaced with the DWARF5 choice member
+  and verified in the image, not just the config.
+- **F-26** `CONFIG_DMA_SHARED_BUFFER=y` is *causally inert* in all four fragments:
+  prompt-less, and `y` only because Kbase's own `midgard/Kconfig:23` selects it.
+  `build.sh` step 5 had been reporting `[ ok ]` because it checks the result, not
+  the cause.
+- **F-27** `MALI_DEBUG=y` silently builds Kbase's unit-test framework
+  (`tests/Kconfig:21`), and that code cannot compile on x86_64/6.12 because
+  `CONFIG_KRETPROBE_ON_RETHOOK=y` removes the `rph` member it uses. A
+  *config-dependent* API break — the same class as F-16 but hitting one profile
+  instead of all four.
+
+None of the three was found by a failing build except F-27, and F-27 was found only
+because the other three profiles had already built — so the same config was tried
+against four different configurations. That is the argument for the per-profile
+ladder rather than one "does it build" check.
 
 **Blocking issue for the coverage profile.** F-23 shows the `kcov` kernel collects
 coverage but *none of it is Kbase* — all 2882 distinct PCs lie inside vmlinux's own

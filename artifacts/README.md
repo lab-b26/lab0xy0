@@ -126,11 +126,11 @@ is kept fuzzer-agnostic.
 ## Current status
 
 ```text
-artifacts produced:   2
+artifacts produced:   3
   baseline            PORTABLE_ARTIFACT_VERIFIED   (DISCOVERY-ONLY, DECISION-1)
   kcov                TARGET_VERIFIED               (DISCOVERY-ONLY, DECISION-1)
+  debug               TARGET_VERIFIED               (DISCOVERY-ONLY, DECISION-1)
   kasan               built + booted (logs kept); bundle NOT packaged
-  debug               not started
 program state:        NOT_STARTED (see ../research/state.md)
 ```
 
@@ -182,7 +182,52 @@ must not read `TARGET_VERIFIED` as "coverage-guided fuzzing is ready here".
 | Profile | Built | Booted + probed | Bundle |
 |---|---|---|---|
 | `kasan` | yes | yes — `passed=0x1ff failed=0x000`, **zero** KASAN reports | not packaged (build tree pruned to save disk) |
-| `debug` | no | — | — |
+| `debug` | yes | yes — `passed=0x1ff failed=0x000`; DWARF5 confirmed in `vmlinux` | `TARGET_VERIFIED`, 460 MB |
+
+`debug`'s bundle is large because it ships `vmlinux` with full DWARF5 debug info —
+which is the entire reason the profile exists. `mali_kbase.ko` alone is 53 MB there
+against 2.4 MB in `baseline`, for the same reason. Do not read the size as
+misconfiguration.
+
+### Verified by `check/check-all.sh` before you trust a bundle
+
+`check/check-all.sh --tier B` re-derives, for every bundle on disk:
+`SHA256SUMS` still matches (B1); the manifest has every required field and names a
+state that is actually in the ladder (B2); a `PORTABLE_ARTIFACT_VERIFIED` claim is
+backed by a clean-location log (B3); no file references an absolute `build/` path
+(B4); and the scope class is `DISCOVERY-ONLY` (B5). `check/selftest.sh` proves each
+of those checks goes red when its defect is re-injected, so a green run is not
+merely a checker that has never been tested.
+
+**Known gap (F-28):** `SHA256SUMS` covers every payload file but **not** the
+bundle's own `README.md` — which is where the bundle states its `validation_status`
+and `scope_class`. So `sha256sum -c` would pass on a bundle whose README described
+different contents. Left open deliberately: covering it means re-packaging every
+bundle, which resets `artifacts/baseline` from `PORTABLE_ARTIFACT_VERIFIED` and
+requires its clean-location boot again. Trading an earned state for a
+documentation-integrity nicety is a bad trade.
+
+### The portability test must use `--strict-artifact`
+
+`run.sh` resolves components **artifact-first with a `build/` fallback**, which is
+convenient before a bundle exists — and is also precisely how a non-self-contained
+bundle gets mistaken for a portable one. Delete `artifacts/<p>/kernel/bzImage` and a
+non-strict boot quietly succeeds from `build/<p>/`.
+
+```sh
+qemu/scripts/verify-boot.sh --profile <p> --artifact artifacts/<p> \
+        --strict-artifact --log /tmp/portable-<p>.log
+```
+
+With the flag, a missing component is a hard error naming the bundle. `run.sh` also
+prints the `kernel=` and `rootfs=` it resolved on every boot, so a fallback is visible
+in the log instead of looking like an artifact boot. Tier C always uses the flag.
+
+The first implementation of that flag was a **no-op** — a `shift` left the fallback
+inside the candidate list, so the `STRICT` gate was never evaluated and the boot used
+`build/` while the trace cheerfully showed `STRICT=1` (F-31). A portability check
+that cannot fail is worse than none, because it converts *unverified* into
+*verified*. `check/selftest.sh` now asserts the negative case.
 
 A profile being *built* is not an artifact, and a profile's components being
 verified is not the profile's bundle being portable. The bundle is what a fuzzer

@@ -1116,6 +1116,413 @@ errno, so a misconfiguration names itself instead of producing a confident lie.
 Scope: DISCOVERY-ONLY per DECISION-1, as always. The number describes this
 simulator build and is not a statement about real hardware.
 
+## F-24 — VERIFIED: `debug.config` asked for `CONFIG_DEBUG_INFO=y`, a symbol that cannot be set
+
+**Status: VERIFIED (defect found and fixed).** Category: `config fragment`. The
+`debug` build stopped at step 5 of 8 with:
+
+```text
+[ MISSING  ] CONFIG_DEBUG_INFO    wanted y — symbol not in the Kconfig
+```
+
+**The error message was wrong, and that is the more interesting half.** The symbol
+*is* present — `lib/Kconfig.debug:227`:
+
+```kconfig
+config DEBUG_INFO
+	bool            # no prompt, no default
+	help
+	  A kernel debug info option other than "None" has been selected
+	  in the "Debug information" choice below ...
+```
+
+It is a **derived, non-visible** `bool`, `select`ed by the members of the
+"Debug information" `choice` at lines 240–290 (`DEBUG_INFO_NONE`,
+`DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT`, `DEBUG_INFO_DWARF4`, `DEBUG_INFO_DWARF5`).
+A symbol with no prompt is unreachable from a `.config` file by construction, so
+`CONFIG_DEBUG_INFO=y` was not merely misplaced — it was **unsatisfiable**, silently
+discarded by `olddefconfig`, and could never have taken effect. The reader is sent
+hunting for a Kconfig line that exists.
+
+Three distinct problems were being reported as one:
+
+| Real cause | Correct fix |
+|---|---|
+| symbol absent from the Kconfig | wrong kernel version |
+| symbol present but prompt-less (this case) | set the `select`ing symbol — the choice member |
+| symbol settable but did not take | unsatisfied `depends on`, or a `choice` picked a sibling |
+
+`build.sh` step 5 now classifies the symbol and prints the right remedy. This is
+the same defect family as **F-20** (merge deleted `is not set` lines) and **F-21**
+(`kasan.config` named no choice member): *a fragment line the tooling accepts and
+that then does nothing.* F-20 and F-21 were found by step 5 refusing to proceed;
+this one was found the same way, which is the only reason it cost minutes rather
+than a silently un-debuggable `debug` kernel.
+
+Resolution: `CONFIG_DEBUG_INFO_DWARF5=y`. **`DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT` was
+deliberately rejected** even though the Kconfig help recommends it for the unsure:
+"toolchain default" makes the debug-info format of the packaged artifact depend on
+the host gcc version, and this repository's product is meant to be reproducible. A
+pinned DWARF version keeps the bundle self-describing.
+
+Note the failure was **not** silent — step 5 stopped the build, so the ~15 min of
+compilation was never spent. That gate is the reason this class of error has been
+caught three times instead of shipping.
+
+## F-31 — VERIFIED: `--strict-artifact` was a no-op, so the portability check could only ever pass
+
+**Status: VERIFIED (defect found and fixed).** Category: `harness`. This is the most
+dangerous defect found so far, because it disables the one check that would have
+caught F-22 recurring.
+
+Tier C is the portability test: it boots each packaged bundle. But `run.sh` resolves
+components **artifact-first with a `build/` fallback**, so a bundle missing a file
+would silently boot from `build/<profile>/` and pass. To close that, I added
+`--strict-artifact`, which is supposed to forbid the fallback.
+
+The first implementation did not forbid anything:
+
+```bash
+resolve_from_artifact() {
+    _label="$1"; _fallback="${3:-}"; _hit=""
+    shift                       # <-- one shift, but there were 3 positional params
+    for cand in "$@"; do        # <-- "$@" still CONTAINS the fallback
+        [ -f "$cand" ] && { _hit="$cand"; break; }
+    done
+    ...
+}
+```
+
+The call passed the fallback as the last element of the candidate list:
+
+```bash
+resolve_from_artifact "bzImage" "$ARTIFACT/kernel/bzImage" "$BUILD_ROOT/.../bzImage"
+```
+
+so a single `shift` left `$3` — the fallback — inside `"$@"`, and the candidate loop
+matched it directly. The `STRICT` gate further down was **never evaluated**. A
+trace shows it plainly:
+
+```text
++ STRICT=1
+++ resolve_from_artifact bzImage artifacts/debug/kernel/bzImage .../build/debug/.../bzImage
+++ _fallback=.../build/debug/.../bzImage
+++ _hit=
+++ _hit=.../build/debug/.../bzImage      <-- taken from the CANDIDATE list
++ KERNEL=.../build/debug/.../bzImage
+```
+
+`STRICT=1` is right there in the trace and is simply irrelevant. **The flag looked
+like it worked, and every test that used it passed.**
+
+**How it was found — not by reading the code.** Reading it, the argument list looks
+plausible. What caught it was running the *negative* case: hide
+`artifacts/debug/kernel/bzImage`, then run with `--strict-artifact` and observe that
+the boot proceeded anyway. That check is now a permanent case in `check/selftest.sh`
+(F-31), asserting `run.sh` **refuses**.
+
+**Fix:** the fallback is now a separate positional parameter — `_fallback="$2"`,
+`shift 2` — so it can never be matched by the candidate loop. Verified both ways:
+
+| Case | Result |
+|---|---|
+| bundle file hidden, `--strict-artifact` | **refuses**: `error: no bzImage for profile 'debug'`, exit 1 |
+| bundle file hidden, no flag | warns loudly, then uses `build/`: `note: bzImage resolved from the build tree` |
+
+The non-strict path now prints what it resolved and from where, on every boot, so a
+fallback boot is visible in the log instead of looking like an artifact boot.
+
+**Why this is recorded at length.** A green portability suite that cannot fail is
+worse than no portability suite: it converts "unverified" into "verified" in the
+reader's mind. This is the F-23 shape one level up — a plausible number from a
+misread of the data — and it is the reason every check in `check/` now has a
+demonstrated red case.
+
+## F-30 — VERIFIED: two different state ladders share four identical names
+
+**Status: VERIFIED (documentation hazard; check corrected).** Category:
+`terminology`. Not a runtime defect — a naming collision that made a *correct*
+check fail on a *correct* claim, and would misdirect a reviewer.
+
+This project has two independent ladders:
+
+| Ladder | Owner | States |
+|---|---|---|
+| project | `research/state.md` | `NOT_STARTED` → … → `PORTABLE_ARTIFACT_VERIFIED` → `SYZKALLER_CONNECTED` → `FUZZING_STARTED` (17) |
+| artifact | `artifacts/README.md` | `BUILT` → `TARGET_VERIFIED` → `QEMU_BOOT_VERIFIED` → `KBASE_LOAD_VERIFIED` → `KCOV_VERIFIED` → `PORTABLE_ARTIFACT_VERIFIED` (6) |
+
+**Four names appear in both**: `QEMU_BOOT_VERIFIED`, `KBASE_LOAD_VERIFIED`,
+`KCOV_VERIFIED`, `PORTABLE_ARTIFACT_VERIFIED`. Nothing in the repo marked them as
+different quantities.
+
+The consequence is concrete. Check D2 compared a bundle's `validation_status`
+against the project's `Current state:`, and failed:
+
+```text
+artifacts/baseline/README.md claims PORTABLE_ARTIFACT_VERIFIED (position 16)
+  above current NOT_STARTED (1)
+```
+
+Both halves were **true**. `artifacts/baseline` really is portable-verified (its
+clean-location boot passed with 5/5 and `sha256sum -c`). `research/state.md` really
+is still `NOT_STARTED`, because the formal ladder walk (P7) has not been done. One
+bundle's portability and the project's state are **different events**; the collision
+made them look comparable and invited a comparison that cannot be made.
+
+**Fixed by separating the checks by ledger**, not by loosening them:
+
+- **D2** validates only the project ledger: transition rows must move monotonically
+  upward, and no project document may assert a `Current state:` above the ledger.
+- **D3** validates only the artifact ladder: a bundle's `validation_status` must be
+  an artifact-ladder state, and may never name a project-only state such as
+  `SYZKALLER_CONNECTED` or `FUZZING_STARTED`. A manifest claiming a fuzzer that
+  does not exist is now caught.
+
+**Not fixed: the naming collision itself.** Renaming either ladder would touch every
+document that cites it, and the names are individually reasonable — `BASELINE_BUILT`
+is a project state and has no business being a bundle status. The accurate fix is to
+make the distinction visible at the point of use, which D2/D3 now do mechanically.
+Recorded rather than silently left ambiguous.
+
+**Also recorded:** an earlier version of D2 failed on `kernel/BUILD-PLAN.md` and
+`artifacts/README.md` merely for *mentioning* `PORTABLE_ARTIFACT_VERIFIED` while
+explaining what it means. A check that fires on correct documentation teaches its
+reader to ignore it, so D2 now matches only claim-shaped lines.
+
+## F-28 — VERIFIED: `SHA256SUMS` does not cover the bundle's own `README.md`
+
+**Status: VERIFIED (gap found by `check/selftest.sh`, not yet fixed).**
+Category: `artifact integrity`. Severity: **low, and deliberately not
+overstated** — no payload file is unprotected, so no code or kernel image can be
+silently altered. Only the human-facing description of the bundle is.
+
+Every bundle carries a `metadata/SHA256SUMS`, and check **B1** re-verifies it. But
+the file list inside `SHA256SUMS` omits `README.md`:
+
+```text
+$ grep -c README artifacts/*/metadata/SHA256SUMS
+artifacts/baseline/metadata/SHA256SUMS:0
+artifacts/debug/metadata/SHA256SUMS:0
+artifacts/kcov/metadata/SHA256SUMS:0
+```
+
+So `sha256sum -c` passes on a bundle whose `README.md` has been edited to describe
+different contents. That matters for this project specifically: the README is where
+the bundle states its `validation_status` and `scope_class`, so it is exactly the
+file whose alteration would turn an honest bundle into a misleading one — and it is
+the one file the checksums do not defend.
+
+**How it surfaced.** The first version of `selftest.sh`'s B1 case appended a byte to
+`artifacts/*/README.md` and asserted B1 would go red. B1 stayed green. The instinct
+is to suspect the check; here the check was right and the *test* was wrong — the
+file is genuinely outside the checksum set. That distinction is the finding: the
+integrity boundary was drawn slightly inside where it should be, and nothing had
+been asserting where it was.
+
+**Not fixed here, and the reason matters.** Closing it means having
+`package-artifact.sh` include `README.md` (and `metadata/SHA256SUMS` cannot cover
+itself, so that one file is legitimately excluded) and then **re-packaging every
+bundle**. Re-packaging regenerates each manifest, which would reset
+`artifacts/baseline` from `PORTABLE_ARTIFACT_VERIFIED` back down the ladder and
+require its clean-location boot again — trading a real, earned validation state for
+a low-severity integrity nicety. That is a bad trade, so the gap is recorded and
+deferred instead of quietly closed.
+
+Recommended when it is done properly: add `README.md` to `SHA256SUMS`, add check B6
+asserting that the only uncovered file is `SHA256SUMS` itself, and re-run the
+portability procedure for the affected bundles rather than assuming the state
+survives a repackage.
+
+## F-29 — VERIFIED: all four config fragments lacked a trailing newline, which silently disarmed two tests
+
+**Status: VERIFIED (defect found and fixed).** Category: `text hygiene` /
+`test infrastructure`. Recorded because it is a nice illustration of a failure mode
+that produces *false confidence*.
+
+`kernel/configs/{baseline,debug,kasan,kcov}.config` all ended **without a final
+newline**. POSIX text files should end with one; more importantly, any tool that
+appends a line to such a file glues it onto the last existing line:
+
+```text
+#   ... whether it initialises in the NO_MALI path is NOT_TESTED.CONFIG_MALI_NOT_A_REAL_SYMBOL=y
+```
+
+The first run of `check/selftest.sh` reported two cases as **NOT PROVEN**:
+
+```text
+NOT PROVEN  F-24b symbol absent from kernel   A2 did NOT fire
+NOT PROVEN  F-21 MALI_DEBUG=y outside debug.config  A3 did NOT fire
+```
+
+The tempting conclusion is that A2 and A3 have holes — they had none. The mutations
+had landed *inside a comment line*, so the checks correctly saw nothing. `append_line`
+in the test now inserts a leading newline when the target lacks one, and all four
+fragments were given proper trailing newlines. Both cases then fired (proven 14/14).
+
+The lesson is the same one as F-23's KCOV result, one level up: **a test that cannot
+detect its own broken input will report the wrong reason for failing.** `selftest.sh`
+reports NOT PROVEN rather than pass precisely so that this sort of thing surfaces as
+"not proven" — a visible gap — instead of as a quietly weakened check.
+
+## F-27 — VERIFIED: `MALI_DEBUG=y` transitively breaks the build on x86_64 — Kbase's unit-test framework uses a kretprobe member that cannot exist
+
+**Status: VERIFIED (defect found; the build reached the compiler and failed).**
+Category: `driver source vs kernel API`. This is the first finding where the
+`debug` profile *cannot* be built as configured, and the chain is worth recording
+in full because no single link is suspicious.
+
+**Symptom** — `build.sh --profile debug` failed in `drivers/gpu/arm/midgard/tests/`:
+
+```text
+tests/kutf/kutf_kprobe.c:139:39: error:
+    'struct kretprobe_instance' has no member named 'rph'
+tests/kutf/kutf_kprobe.c:143:1: error: control reaches end of non-void function
+```
+
+**The chain, each link verified in source:**
+
+1. `midgard/tests/Kconfig:21` —
+   `menuconfig MALI_KUTF … depends on MALI_MIDGARD && MALI_DEBUG / default y if MALI_DEBUG`.
+   So setting `MALI_DEBUG=y` **silently opts the profile into building Kbase's
+   unit-test framework** (`kutf.ko`, `kutf_test.ko`). Confirmed in the effective
+   config: `CONFIG_MALI_KUTF=y` plus `MALI_KUTF_{IRQ_TEST,CLK_RATE_TRACE,MGM_INTEGRATION_TEST}=y`
+   appear in `build/debug/.config` and in **no other** profile's config.
+2. `midgard/Kbuild:138` — `obj-$(CONFIG_MALI_KUTF) += tests/`, so the tests build.
+3. `tests/kutf/kutf_kprobe.c:135-142` branches on **kernel version only**:
+   ```c
+   #if (KERNEL_VERSION(5, 11, 0) <= LINUX_VERSION_CODE)
+           return kutf_call_kp_handler(ri->rph->rp);
+   #else
+           return kutf_call_kp_handler(ri->rp);
+   #endif
+   ```
+   It assumes that from 5.11 onward `rph` always exists.
+4. `include/linux/kprobes.h:162` — that assumption is false:
+   ```c
+   struct kretprobe_instance {
+   #ifdef CONFIG_KRETPROBE_ON_RETHOOK
+           struct rethook_node node;      /* no rph member at all */
+   #else
+           ...
+           struct kretprobe_holder *rph;
+   #endif
+   ```
+5. `arch/Kconfig:208` — `KRETPROBE_ON_RETHOOK` is `def_bool y` (given
+   `HAVE_RETHOOK` + `KRETPROBES`, both true on x86_64). Confirmed:
+   `CONFIG_KRETPROBE_ON_RETHOOK=y` in `build/debug/.config`.
+
+**So this is not a version break — it is a config-dependent API break.** r54p0
+guards on `LINUX_VERSION_CODE >= 5.11` where the real condition is a *Kconfig*
+symbol, and on x86_64/6.12 the version test passes while the code cannot compile.
+This is the same *class* as **F-16** (`__SetPageMovable` removed in v6.17): Kbase
+assuming a kernel API shape that the configuration does not guarantee. F-16 was
+version-gated and hit every profile; F-27 is config-gated and hits exactly one —
+which is why three profiles built and only `debug` failed.
+
+Note what was **not** done: the obvious "fix the version check" is wrong, because
+there is no kernel version at which `ri->rph` is correct under
+`KRETPROBE_ON_RETHOOK`. A patch would have to test the Kconfig symbol, not the
+version.
+
+**Resolution:** `# CONFIG_MALI_KUTF is not set` in `debug.config`. The kutf modules
+are Kbase's *self-test* modules and are not needed for a crash-analysis profile, so
+this excludes a test framework rather than papering over a driver defect. Chosen
+over a research patch to `kutf_kprobe.c` because (a) it keeps vendor source
+untouched, (b) the alternative is patching a file we have no other reason to want
+compiled, and (c) a partial kutf fix would likely hit the same assumption in
+sibling files.
+
+**Stated limitation, not hidden:** the `debug` profile therefore does **not** build
+Kbase's own unit tests. If a future experiment needs them, that is separate work
+requiring a `kutf_kprobe.c` patch that tests `CONFIG_KRETPROBE_ON_RETHOOK` rather
+than the kernel version.
+
+## F-26 — VERIFIED: `CONFIG_DMA_SHARED_BUFFER=y` in all four fragments is causally inert
+
+**Status: VERIFIED (found by `check/check-all.sh` A2, not by a failing build).**
+Category: `config fragment`. Same family as **F-24**, and it is the more dangerous
+half of that family, because nothing complained.
+
+Across all four fragments, exactly one symbol cannot be set from a config file:
+
+```text
+kernel/configs/{baseline,kasan,kcov,debug}.config: CONFIG_DMA_SHARED_BUFFER
+```
+
+`drivers/base/Kconfig:200` declares it prompt-less:
+
+```kconfig
+config DMA_SHARED_BUFFER
+	bool
+	default n
+	select IRQ_WORK
+```
+
+So the fragment line is inert — exactly like `CONFIG_DEBUG_INFO` in F-24. The
+difference is what happens next, and it is the whole point:
+
+| | F-24 `DEBUG_INFO` | F-26 `DMA_SHARED_BUFFER` |
+|---|---|---|
+| is it `y` in the built `.config`? | **no** | **yes** |
+| why | nothing selects it | `select`ed by **Kbase itself**, `midgard/Kconfig:23`, plus ~7 other drivers |
+| did step 5 notice? | yes — `[ MISSING ]` | **no — reported `[ ok ] = y`** |
+| consequence | profile silently lacks debug info | the *requirement* is met, but not by the line that claims to meet it |
+
+`build.sh` step 5 verifies the **result** (`DMA_SHARED_BUFFER=y` in `.config`) and
+not the **causation**, so an inert line reads as a satisfied one. That distinction is
+the finding: *a check that confirms a value without confirming which input produced
+it will happily credit the wrong cause.*
+
+This matters more than it looks, because `DMA_SHARED_BUFFER` is one of the **five
+unconditional Kbase hard gates** recorded in F-3/F-11 — `midgard/Kbuild` raises
+`$(error …)` when it is off, and the fragments were written to satisfy all five
+explicitly. Four of them are genuinely set by the fragment. This one is not; it is
+satisfied incidentally, by Kbase's own `select`.
+
+The failure mode is at least loud rather than silent: if a future Kbase dropped that
+`select`, the inert line still could not set it, `midgard`'s `$(error)` would fire,
+and the build would stop. So this is a **documentation and attribution defect, not a
+build-integrity hole** — the kernel produced is correct. Recorded at that severity
+deliberately; inflating it would be its own kind of dishonesty.
+
+Resolution: the line is **kept** (it is the record of *why* the gate is believed
+satisfied) but annotated `# INERT:` with the real reason, and `check-all.sh` gained
+check **A11**, which fails if a fragment names a prompt-less symbol *without* saying
+so. Honesty about inert lines is now mechanical rather than a matter of care.
+`build.sh` step 5 additionally labels such symbols `[ ok ]` → `[ ok* ]` with an
+`*INERT (satisfied by a select, not by this line)` note, so the build log can no
+longer imply causation it does not have.
+
+## F-25 — VERIFIED: a fragment header asserted a validation state that had not happened
+
+**Status: VERIFIED (self-caught, fixed).** Category: `evidence discipline`.
+
+While fixing F-24 I edited `debug.config`'s header from
+
+```text
+# Validation:     PROVISIONAL — never fed to a build.
+```
+
+to
+
+```text
+# Validation:     BUILT + BOOTED on 6.12.111 (see research/boot-logs/, F-24).
+```
+
+The `debug` profile had **not** been built at that moment, and no boot log existed.
+The edit was exactly the failure mode this repository treats as its central risk: a
+claim written in anticipation of the evidence rather than from it. It was reverted
+in the same session, before any commit, and the header now reads `NOT YET BUILT`
+with an explicit instruction to update it **in the same commit that earns the
+claim, never in anticipation of one**.
+
+Recorded rather than quietly dropped, because the temptation is structural: a
+header that says "provisional" is visibly stale, and the fastest way to make it look
+maintained is to write the result you *expect*. Every other fragment in
+`kernel/configs/` carries the same header shape and is exposed to the same pull.
+`check/check-all.sh` check **A7** now compares header claims against the filesystem
+so the drift is caught mechanically rather than by good intentions.
+
 ## Consolidated unknowns
 
 1. ~~Whether r54p0 + all six patches compiles on any x86_64 Linux kernel.~~
