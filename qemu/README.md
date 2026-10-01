@@ -33,35 +33,46 @@ reuse with multiple fuzzers
 ## Current status
 
 ```text
-QEMU build:        NOT STARTED (qemu-system-x86_64 not installed — VERIFIED)
-QEMU package:      none
-boot validation:   NOT TESTED
+QEMU build:        not built from source — the host's qemu-system-x86_64 is used
+QEMU package:      none (no artifact packaged yet)
+boot validation:   VERIFIED for baseline + kasan — see ../../research/boot-logs/
 ```
 
+Boot validation is real, not aspirational: `baseline` and `kasan` each boot to
+`/init`, `insmod mali_kbase.ko` with rc=0, and drive the EL0 ioctl surface to
+`passed=0x1ff failed=0x000`. Evidence and the two undocumented ioctl contracts it
+uncovered are in F-19 of `../../analysis/findings.md`. Per DECISION-1 all of it is
+DISCOVERY-ONLY.
+
 Per the project spec, QEMU is **not** built or booted in this organisation phase.
-This directory is the documented plan and layout only. No scripts here download
-anything or assume a particular installed QEMU.
+This directory now contains working scripts. They consume prebuilt components and
+never download or build anything themselves.
 
 ## Layout
 
 | Path | Purpose |
 |---|---|
 | `README.md` | this file — goal and design |
-| `scripts/` | future launch/verify wrappers (repo-relative, profile-agnostic) |
-| `rootfs/` | minimal rootfs definition and packaging (see `rootfs/README.md`) |
+| `scripts/` | launch/verify wrappers (repo-relative, profile-agnostic) — EXISTS, see `scripts/README.md` |
+| `rootfs/` | minimal rootfs builder — EXISTS, see `rootfs/README.md` |
+| `target/` | `kbase-probe.c`, the EL0 ioctl exerciser (source only; the compiled binary is a build output and is gitignored) |
 
-## Future launch flow (PLANNED)
+## Launch flow
 
 ```bash
 # select a prebuilt, packaged profile artifact and boot it
-qemu/scripts/run.sh --artifact <path> --profile <baseline|kcov|kasan|debug>
+qemu/scripts/run.sh --profile <baseline|kcov|kasan|debug> [--artifact <path>]
+
+# or assert the whole sequence and get a bitmask exit status
+qemu/scripts/verify-boot.sh --profile <baseline|kcov|kasan|debug>
 ```
 
-The wrapper would, in order: resolve the artifact bundle; pick `bzImage` and
-`System.map` for the profile; attach the profile's `modules/` (containing Kbase);
-mount the packaged rootfs as the initramfs/disk; open a control channel (serial /
-socat) for the fuzzer; and start with `-enable-kvm` when `/dev/kvm` is present.
-No step in that flow rebuilds anything.
+The wrapper does, in order: resolve the artifact bundle (`--artifact`, else
+`artifacts/<profile>`, else `build/<profile>`); pick `bzImage` for the profile;
+use the profile's `rootfs-<profile>.cpio.gz` (which already embeds that profile's
+`mali_kbase.ko`); attach the serial console as the control channel; and use
+`-enable-kvm` only if `/dev/kvm` is actually *usable* by this user, otherwise fall
+back to TCG with `-cpu max`. No step rebuilds anything.
 
 ## Portability
 
@@ -70,10 +81,11 @@ artifact. It is not considered validated until the full procedure in
 `../artifacts/README.md` (portability validation) passes from a clean location
 with the original build tree inaccessible.
 
-## Not yet decided (UNKNOWN until build phase)
+## Still open
 
-- Exact QEMU version to pin (must be recorded in the artifact manifest).
-- Whether the rootfs is a cpio initramfs or a small disk image; the rootfs README
-  sketches the tradeoff.
+- Exact QEMU version to pin (must be recorded in the artifact manifest). The host
+  binary is used as-is today; the pin is not yet recorded.
 - Guest networking for the fuzzer control channel (serial vs virtio-net vs vsock).
-- Memory/CPU sizing that fits the 7.4 GB host while leaving room for the host.
+  Serial is the current candidate; nothing fuzzer-facing is built yet.
+- Memory/CPU sizing. Measured: `-m 2048 -smp 4` boots in ~2 s of guest time on
+  KVM, which is ample for this harness.
