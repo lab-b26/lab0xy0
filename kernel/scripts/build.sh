@@ -192,13 +192,41 @@ if [ -f "$OUT/.config" ]; then
 else
     ( cd "$KERNEL_SRC" && make O="$OUT" defconfig ) >>"$LOG" 2>&1 \
         || die "defconfig failed — see $LOG"
-    # The fragment is already in .config syntax. Appending it and letting
-    # olddefconfig resolve it is more robust than scripts/config, and unknown
-    # symbols are dropped by kconfig (which step 5 then detects).
-    grep -v '^#' "$FRAG" | grep -v '^[[:space:]]*$' >> "$OUT/.config" || true
+    # The fragment is already in .config syntax. Two classes of line are
+    # SYMBOL-bearing and must both survive the merge:
+    #
+    #     CONFIG_X=value                 the symbol set
+    #     # CONFIG_X is not set          the ONLY kconfig encoding for "off"
+    #
+    # F-19: an earlier merge used `grep -v '^#'`, which silently deleted every
+    # `is not set` line. A fragment could then not express "must be off" at all,
+    # and any Kconfig `choice` fell back to its kconfig `default` — on the kasan
+    # profile that turned `# CONFIG_MALI_REAL_HW is not set` into
+    # `CONFIG_MALI_REAL_HW=y`. Step 5/8 caught it, so it was not silent
+    # end-to-end, but the fragment was un-honourable. Keep both forms.
+    #
+    # Prose comments and blank lines are dropped: they are documentation, and
+    # `# CONFIG_X=y  <- note` is not valid kconfig anyway (trailing text).
+    # Unknown symbols still reach step 5, which fails the build.
+    sed -n -e '/^CONFIG_[A-Za-z0-9_]*=/p' \
+           -e '/^# CONFIG_[A-Za-z0-9_]* is not set$/p' \
+           "$FRAG" > "$OUT/.fragment" || die "could not read fragment $FRAG"
+
+    # Drop any pre-existing .config line for a symbol the fragment mentions, so
+    # the fragment is the single authority and no duplicate line can win by
+    # position (kconfig honours the first occurrence; relying on that is a trap).
+    frag_syms=$(sed -n -e 's/^\(CONFIG_[A-Za-z0-9_]*\)=.*/\1/p' \
+                        -e 's/^# \(CONFIG_[A-Za-z0-9_]*\) is not set$/\1/p' \
+                        "$OUT/.fragment" | sort -u)
+    if [ -n "$frag_syms" ]; then
+        sympat=$(printf '%s\n' "$frag_syms" | paste -sd'|')
+        sed -i -E "/^($sympat)(=| |$)|^# ($sympat) is not set$/d" "$OUT/.config"
+    fi
+    cat "$OUT/.fragment" >> "$OUT/.config"
+
     ( cd "$KERNEL_SRC" && make O="$OUT" olddefconfig ) >>"$LOG" 2>&1 \
         || die "olddefconfig failed after merging the fragment — see $LOG"
-    log "merged fragment via append + olddefconfig"
+    log "merged fragment ($(grep -c . "$OUT/.fragment") symbol lines, 'is not set' preserved)"
 fi
 
 # --- 5. VERIFY the fragment actually took ---------------------------------
