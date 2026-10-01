@@ -168,6 +168,11 @@ Negative cases -- each must turn its check RED
   --     A6   leave a gap in the findings numbering
   vendor A5   modify a byte of a vendor patch
   F-28   B1   corrupt a SHA256SUMS-covered bundle file
+  --     A12  a DONE task cites a check that does not exist
+  --     A12b a check range spanning the two ladders (A2-B5)
+  --     A12c a DONE task whose Evidence line was deleted
+  --     A12d a MISSING path on a WRAPPED Evidence continuation line
+  F-31   --   hide a bundle file; --strict-artifact must REFUSE
 EOF
     exit 0
 fi
@@ -256,6 +261,48 @@ append_line patches/virtual-device/0001-mali-fix-build-error-for-CONFIG_OF-n-for
 expect_fail "A5  vendor patch modified" A5 A
 cp -p "$BACKUP/patches/virtual-device/0001-mali-fix-build-error-for-CONFIG_OF-n-for-4.1-kernels.patch" \
       patches/virtual-device/0001-mali-fix-build-error-for-CONFIG_OF-n-for-4.1-kernels.patch
+
+# --- A12: a DONE task citing a check that does not exist -----------------------
+# A task that writes "Checks: A2, A99" reads as carefully verified work while A99
+# verifies nothing. Citing a check is how a task asserts its claim is
+# machine-checked, so a dangling citation is the same defect as an unchecked claim.
+snapshot TODO.md
+sed -i 's/^Checks: A2, A11, A7$/Checks: A2, A11, A99/' TODO.md
+expect_fail "A12 DONE task cites a nonexistent check" A12 A
+cp -p "$BACKUP/TODO.md" TODO.md
+
+# --- A12b: a check range spanning the two ladders ------------------------------
+# `A1-B5` looks like coverage and is meaningless: A is the static ladder, B the
+# artifact ladder, and they need different preconditions to run at all. A range
+# that silently crosses them hides which checks a task actually depends on.
+snapshot TODO.md
+sed -i 's/^Checks: A2, A6$/Checks: A2-B5/' TODO.md
+expect_fail "A12b check range spans two ladders" A12 A
+cp -p "$BACKUP/TODO.md" TODO.md
+
+# --- A12c: a DONE task with no Evidence line at all ----------------------------
+# Targets a task that actually IS marked DONE. The first attempt removed the
+# Evidence line from a NOT-DONE step, which correctly does not fail -- the check
+# only requires evidence for work claimed complete. A test that targets the wrong
+# row reports NOT PROVEN for the wrong reason.
+snapshot TODO.md
+sed -i 's|^Evidence: `check/selftest.sh`, `check/README.md`$|# evidence deleted by selftest|' TODO.md
+expect_fail "A12c DONE task with no evidence line" A12 A
+cp -p "$BACKUP/TODO.md" TODO.md
+
+# --- A12d: a MISSING path on a WRAPPED continuation line ----------------------
+# Evidence entries wrap, and the first implementation read only the `Evidence:`
+# line, so everything after the first line went unverified. Two attempts at this
+# case were wrong before this one:
+#   - deleting a citation proves nothing, because the file still exists and the
+#     check verifies that CITED paths exist, not which citations are present;
+#   - the path has to sit on a CONTINUATION line, or a check that reads only the
+#     first line would pass and this case would prove nothing either.
+# So: point a continuation line at a file that does not exist.
+snapshot TODO.md
+sed -i 's|`qemu/scripts/verify-boot.sh`|`qemu/scripts/this-file-does-not-exist.sh`|' TODO.md
+expect_fail "A12d missing path on a wrapped line" A12 A
+cp -p "$BACKUP/TODO.md" TODO.md
 
 # --- B1: a corrupted byte inside a packaged bundle -----------------------------
 # Pick a file that SHA256SUMS actually covers. The first version of this case

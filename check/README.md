@@ -77,10 +77,24 @@ still claiming `NOT BUILT` after both had been built and booted — stale in the
 *understating* direction, which is just as wrong.
 
 **A12 reads `TODO.md`.** A task list where `DONE` is an assertion is a wish list.
-Every `DONE` step must carry an `Evidence:` line, and every repo path on an
-`Evidence:` line must exist. Backticked names in prose are not verified — demanding
-a full repo path for every mention would make the document unreadable without making
-the plan any more honest.
+Every `DONE` step must carry an `Evidence:` line, every repo path inside it must
+exist, and every check ID it cites must be a check that actually exists — a task
+writing `Checks: A2, A99` reads as verified work while `A99` verifies nothing.
+Ranges are expanded, and a range that crosses ladders (`A2-B5`) is rejected: A and B
+need different preconditions, so such a range hides what a task really depends on.
+
+Evidence fields **wrap**, so the extractor reads the `Evidence:` line *and* its
+continuations. An earlier version read only the first line and silently skipped the
+rest — half the citation unverified. Backticked names in prose are deliberately not
+verified: demanding a full repo path for every mention would make the document
+unreadable without making the plan any more honest.
+
+A12 has four negative cases, and three of its first drafts were wrong in instructive
+ways: one deleted a citation (which cannot fail a check that verifies *cited paths
+exist*); one removed the Evidence line from a step that was not `DONE` (correctly not
+a failure); one used a path another task also cites. Each was reported `NOT PROVEN`
+rather than quietly passing — which is the whole reason `selftest.sh` distinguishes
+"fired", "clean" and "not proven" as three outcomes.
 
 **D2 and D3 split two ladders that share four names.** `research/state.md` has a
 *project* ladder (17 states, ending in `FUZZING_STARTED`); `artifacts/README.md` has
@@ -128,8 +142,12 @@ re-injects each historical defect and asserts the named check goes **red**:
 | vendor | a byte appended to a vendor patch | A5 |
 | F-28 | a byte appended to a `SHA256SUMS`-covered bundle file | B1 |
 | F-31 | hide a bundle's `bzImage`; `--strict-artifact` must **refuse** | C1 |
+| — | a `DONE` task citing a check that does not exist | A12 |
+| — | a check range spanning the two ladders (`A2-B5`) | A12 |
+| — | a `DONE` task whose `Evidence:` line was deleted | A12 |
+| — | a **missing** path on a *wrapped* `Evidence:` continuation line | A12 |
 
-Current result: **15 proven, 0 not-proven, 4 clean-tree positive controls.**
+Current result: **19 proven, 0 not-proven, 4 clean-tree positive controls.**
 
 Note the F-28 case: its first version tampered with a bundle's `README.md` and B1
 stayed green. The instinct is to suspect the check; here the check was right and the

@@ -518,6 +518,51 @@ a12_todo_evidence_exists() {
         _bad="$_bad\n    $(printf '%s' "$_head" | cut -c1-54): DONE with no Evidence: line"
     fi
 
+    # Every check ID a task cites must be a REAL check. A task that writes
+    # "Checks: A2, A11, A99" reads as carefully verified work; A99 verifies
+    # nothing. Citing a check is how a task claims its claim is machine-checked,
+    # so a dangling citation is the same defect as an unchecked claim.
+    #
+    # IDs come from two places: the `check "A1 ..."` registrations, and the
+    # dynamic per-bundle emissions (`ok "C1 ..."` inside the tier C loop), which
+    # a scan of `check "` alone would miss -- C1 is real, it just runs once per
+    # bundle instead of once.
+    _known=$(
+        { grep -oE '^[[:space:]]*check[[:space:]]+"[A-D][0-9]+' check/check-all.sh
+          grep -oE '^[[:space:]]*(ok|bad|skip)[[:space:]]+"[A-D][0-9]+' check/check-all.sh
+        } 2>/dev/null | grep -oE '[A-D][0-9]+' | sort -u
+    )
+    _cited=$(grep -E '^Checks:' TODO.md | sed 's/[–—]/-/g' \
+             | grep -oE '[A-D][0-9]+(-[A-D]?[0-9]+)?' | sort -u)
+    _expanded=/tmp/.todo-checks.$$
+    : > "$_expanded"
+    for _tok in $_cited; do
+        case "$_tok" in
+            *-*)
+                _lo=${_tok%%-*}; _hi=${_tok#*-}
+                _ll=${_lo%%[0-9]*}; _ln=${_lo##*[!0-9]}
+                _hl=${_hi%%[0-9]*}; _hn=${_hi##*[!0-9]}
+                # Default the end-letter ONLY when absent ("A1-12"). Overriding a
+                # real letter erased the mismatch this test exists to find:
+                # "A2-B5" had its B replaced by A and passed. Two of the checks'
+                # own bugs were found by running their negative case rather than
+                # by reading them -- F-29, F-30, and now this.
+                [ -z "$_hl" ] && _hl=$_ll
+                if [ "$_ll" != "$_hl" ]; then
+                    _bad="$_bad\n    TODO.md cites a check range spanning two ladders: $_tok"
+                    continue
+                fi
+                for _n in $(seq "$_ln" "$_hn"); do printf '%s%s\n' "$_ll" "$_n" >> "$_expanded"; done
+                ;;
+            *)  printf '%s\n' "$_tok" >> "$_expanded" ;;
+        esac
+    done
+    for _id in $(sort -u "$_expanded"); do
+        printf '%s\n' "$_known" | grep -qx "$_id" || \
+            _bad="$_bad\n    TODO.md cites check $_id, which check-all.sh does not define"
+    done
+    rm -f "$_expanded"
+
     # Every repo-relative path on an Evidence: line must exist. This is where the
     # check earns its keep: an Evidence line is a machine-checkable assertion, so
     # a log that was deleted or a file that was renamed breaks it. Backticked
@@ -525,7 +570,16 @@ a12_todo_evidence_exists() {
     # `kcov.config`) and are deliberately NOT verified -- demanding that every
     # mention be written as a full repo path would only make the document
     # unreadable without making the plan any more honest.
-    grep -E '^Evidence:' TODO.md \
+    # An Evidence entry wraps across lines (several are too long for one), so
+    # grepping only ^Evidence: checked the FIRST line and silently skipped the
+    # rest -- half the citation unverified. Collect the whole field: the
+    # Evidence line plus its continuations, up to a blank line or the next field.
+    awk '
+        /^Evidence:/            { inev = 1; print; next }
+        inev && /^[[:space:]]*$/ { inev = 0 }
+        inev && /^(Status:|Checks:|Evidence:|###|##|---)/ { inev = 0 }
+        inev                    { print }
+    ' TODO.md \
         | grep -oE '`[A-Za-z0-9_./-]+`' | tr -d '`' | sort -u > /tmp/.todo-ev.$$
     while IFS= read -r p; do
         [ -n "$p" ] || continue

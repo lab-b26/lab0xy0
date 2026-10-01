@@ -138,9 +138,11 @@ twice (prompt-less symbol, and a symbol the kernel does not have), F-26 abuse
 (annotating a settable symbol inert), F-21 (scope escape), F-25 (header overclaim),
 F-25b (documented count vs disk), A8 (phantom log citation), A6 (findings gap), A5
 (edited vendor patch), B1 (corrupted covered bundle file), F-31 (strict mode must
-refuse a missing bundle file).
+refuse a missing bundle file), and four A12 cases (a dangling check ID, a range
+spanning two ladders, a `DONE` task with no evidence, a missing path on a wrapped
+evidence line).
 
-**Current result: 15 proven, 0 not-proven, 4 clean-tree positive controls.**
+**Current result: 19 proven, 0 not-proven, 4 clean-tree positive controls.**
 
 Three design points that are load-bearing:
 
@@ -322,7 +324,7 @@ along with `kernel/sources/` and `build/`.
 Every one of these, or the work is not done:
 
 - [x] `check/check-all.sh` — all tiers green (**23 passed, 0 failed**, incl. 3 boots)
-- [x] `check/selftest.sh` — every check proven to catch its defect (**15 proven, 0
+- [x] `check/selftest.sh` — every check proven to catch its defect (**19 proven, 0
       not-proven**), tree restored byte-identical
 - [ ] all four profiles built, booted 5/5, packaged — `kasan` has no bundle (P4)
 - [ ] all four bundles relocated-tested and at `PORTABLE_ARTIFACT_VERIFIED`
