@@ -43,6 +43,9 @@ Usage: qemu/scripts/verify-boot.sh --profile <name> [options]
 
   --profile <name>   baseline | kasan | kcov | debug   (required)
   --artifact DIR     artifact bundle (default: artifacts/<profile>)
+  --strict-artifact  every component must resolve from the bundle; a missing
+                     file is a hard error, not a silent build-tree substitute.
+                     The portability test relies on this.
   --log FILE         keep the serial log here
                      (default: research/boot-logs/<date>-<profile>-BOOT.log)
   --timeout SEC      give up after this long (default: 600)
@@ -51,12 +54,14 @@ Exit status is the bitmask of failed assertions; see the header of this script.
 EOF
 }
 
+STRICT_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --profile) PROFILE="${2:-}"; shift 2 ;;
         --artifact) ARTIFACT="${2:-}"; shift 2 ;;
         --log) LOG="${2:-}"; shift 2 ;;
         --timeout) TIMEOUT="${2:-}"; shift 2 ;;
+        --strict-artifact) STRICT_ARGS=(--strict-artifact); shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
@@ -73,11 +78,14 @@ echo "=============================================================="
 echo " verify-boot.sh -- profile $PROFILE"
 echo "=============================================================="
 echo "serial log: $LOG"
+[ "${#STRICT_ARGS[@]}" -gt 0 ] && \
+    echo "strict:    every component must resolve from the bundle (no build-tree fallback)"
 
 set +e
 timeout "$TIMEOUT" "$REPO_ROOT/qemu/scripts/run.sh" \
     --profile "$PROFILE" \
     ${ARTIFACT:+--artifact "$ARTIFACT"} \
+    "${STRICT_ARGS[@]}" \
     --serial "$LOG"
 QEMU_RC=$?
 set -e

@@ -46,6 +46,10 @@ Usage: qemu/scripts/run.sh --profile <name> [options] [-- extra qemu args]
   --rootfs FILE      initramfs to boot (default: build/rootfs/rootfs-<profile>.cpio.gz)
   --serial FILE      write the serial console here (default: stdout only)
   --accel MODE       kvm | tcg | auto   (default: auto)
+  --strict-artifact  forbid the build/<profile> fallback: every component must
+                     come from the bundle. REQUIRED by the portability test --
+                     without it a missing bundle file is silently replaced by
+                     the build tree and an incomplete bundle looks portable.
   --mem MB           guest RAM (default: 2048)
   --cpus N           guest vCPUs (default: 4)
   --interactive      keep the guest alive on stdin instead of powering off
@@ -59,6 +63,7 @@ EOF
 }
 
 INTERACTIVE=0
+STRICT=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --profile) PROFILE="${2:-}"; shift 2 ;;
@@ -66,6 +71,7 @@ while [ $# -gt 0 ]; do
         --rootfs) ROOTFS="${2:-}"; shift 2 ;;
         --serial) SERIAL="${2:-}"; shift 2 ;;
         --accel) ACCEL="${2:-}"; shift 2 ;;
+        --strict-artifact) STRICT=1; shift ;;
         --mem) MEM="${2:-}"; shift 2 ;;
         --cpus) CPUS="${2:-}"; shift 2 ;;
         --interactive) INTERACTIVE=1; shift ;;
@@ -86,14 +92,42 @@ command -v "$QEMU" >/dev/null 2>&1 || die "qemu binary not found: $QEMU"
 # --- resolve the prebuilt components (never build) ------------------------
 [ -n "$ARTIFACT" ] || ARTIFACT="$ARTIFACT_DEFAULT/$PROFILE"
 
-KERNEL=""
-for cand in \
-    "$ARTIFACT/kernel/bzImage" \
-    "$BUILD_ROOT/$PROFILE/arch/x86/boot/bzImage"
-do
-    if [ -f "$cand" ]; then KERNEL="$cand"; break; fi
-done
-[ -n "$KERNEL" ] || die "no bzImage for profile '$PROFILE'.
+# The build-tree fallback below exists for convenience BEFORE a bundle is
+# packaged. But it is also the exact way a non-self-contained bundle gets mistaken
+# for a portable one: if artifacts/<p>/kernel/bzImage went missing, the boot would
+# silently succeed from build/<p>/ and nothing would notice the bundle is
+# incomplete. That is F-22's failure mode recurring through the back door. So
+# --strict-artifact forbids the fallback entirely, and the portability test uses
+# it: a missing component becomes a hard error naming the bundle, never a silent
+# substitution.
+# resolve_from_artifact <label> <fallback> <candidate> [candidate...]
+#
+# The fallback is a SEPARATE positional parameter, deliberately. An earlier version
+# took it as the last element of the candidate list and shifted once -- so `shift`
+# left the fallback still inside "$@", the candidate loop matched it directly, and
+# --strict-artifact was never consulted at all. The flag appeared to work (STRICT=1
+# was plainly visible in the trace) while the boot silently used build/ anyway.
+# That is the worst possible shape of bug here: a portability check that always
+# passes. Found by testing the flag's negative case, not by reading the code.
+resolve_from_artifact() {
+    _label="$1"; _fallback="$2"; _hit=""
+    shift 2
+    for cand in "$@"; do
+        if [ -f "$cand" ]; then _hit="$cand"; break; fi
+    done
+    if [ -z "$_hit" ] && [ -n "$_fallback" ] && [ "$STRICT" -eq 0 ] && [ -f "$_fallback" ]; then
+        echo "note: $_label resolved from the build tree, not the bundle:" >&2
+        echo "      $_fallback" >&2
+        echo "      (pass --strict-artifact to forbid this)" >&2
+        _hit="$_fallback"
+    fi
+    [ -n "$_hit" ] || return 1
+    printf '%s' "$_hit"
+}
+
+KERNEL=$(resolve_from_artifact "bzImage" \
+    "$BUILD_ROOT/$PROFILE/arch/x86/boot/bzImage" \
+    "$ARTIFACT/kernel/bzImage") || die "no bzImage for profile '$PROFILE'.
 Looked in:
   $ARTIFACT/kernel/bzImage
   $BUILD_ROOT/$PROFILE/arch/x86/boot/bzImage
@@ -104,20 +138,22 @@ Build it first:  kernel/scripts/build.sh --profile $PROFILE"
 # would not be self-contained, which is the whole point of packaging one
 # (see ../../artifacts/README.md). Same candidate order as the kernel: artifact
 # first, build tree only as a pre-packaging fallback.
-ROOTFS=""
-for cand in \
+ROOTFS=$(resolve_from_artifact "rootfs" \
+    "$BUILD_ROOT/rootfs/rootfs-$PROFILE.cpio.gz" \
     "$ARTIFACT/rootfs/rootfs-$PROFILE.cpio.gz" \
-    "$ARTIFACT/rootfs/rootfs.cpio.gz" \
-    "$BUILD_ROOT/rootfs/rootfs-$PROFILE.cpio.gz"
-do
-    if [ -f "$cand" ]; then ROOTFS="$cand"; break; fi
-done
-[ -n "$ROOTFS" ] || die "no rootfs for profile '$PROFILE'.
+    "$ARTIFACT/rootfs/rootfs.cpio.gz") || die "no rootfs for profile '$PROFILE'.
 Looked in:
   $ARTIFACT/rootfs/rootfs-$PROFILE.cpio.gz
   $ARTIFACT/rootfs/rootfs.cpio.gz
   $BUILD_ROOT/rootfs/rootfs-$PROFILE.cpio.gz
 Build it first:  qemu/rootfs/build-rootfs.sh --profile $PROFILE"
+
+# Report what was actually used, so the log records which tree answered. Silence
+# here would let a fallback boot masquerade as an artifact boot -- the reviewer
+# reading a PASS has no way to tell the two apart otherwise.
+echo "run.sh: profile=$PROFILE strict=$STRICT" >&2
+echo "run.sh:   kernel=$KERNEL" >&2
+echo "run.sh:   rootfs=$ROOTFS" >&2
 
 # --- accelerator selection -------------------------------------------------
 # "KVM present" is not "KVM usable": the device node can be root-only.
