@@ -126,10 +126,10 @@ is kept fuzzer-agnostic.
 ## Current status
 
 ```text
-artifacts produced:   1
+artifacts produced:   2
   baseline            PORTABLE_ARTIFACT_VERIFIED   (DISCOVERY-ONLY, DECISION-1)
+  kcov                TARGET_VERIFIED               (DISCOVERY-ONLY, DECISION-1)
   kasan               built + booted (logs kept); bundle NOT packaged
-  kcov                built; bundle NOT packaged
   debug               not started
 program state:        NOT_STARTED (see ../research/state.md)
 ```
@@ -161,12 +161,27 @@ qemu/scripts/package-artifact.sh --profile baseline \
 `--validation-state` is a required claim about *this bundle*; the script refuses
 states outside the table above so "portable" can never be asserted by accident.
 
-### Per-profile status of the other three
+### `artifacts/kcov`
+
+```text
+identity      kbase-r54p0-01eac0-6.12.111-kcov
+size          80 MB, 16 files
+validation    TARGET_VERIFIED
+scope class   DISCOVERY-ONLY
+integrity     16/16 OK
+```
+
+Packaged and integrity-checked, but **not** clean-location tested, so it is not
+`PORTABLE_ARTIFACT_VERIFIED`. Note also that this artifact is
+`TARGET_VERIFIED` while its *purpose* — coverage — is only partly served: KCOV
+works (2882 distinct PCs), but none of that coverage is Kbase (F-23). A consumer
+must not read `TARGET_VERIFIED` as "coverage-guided fuzzing is ready here".
+
+### Per-profile status of the other two
 
 | Profile | Built | Booted + probed | Bundle |
 |---|---|---|---|
 | `kasan` | yes | yes — `passed=0x1ff failed=0x000`, **zero** KASAN reports | not packaged (build tree pruned to save disk) |
-| `kcov` | yes | not yet | not packaged |
 | `debug` | no | — | — |
 
 A profile being *built* is not an artifact, and a profile's components being

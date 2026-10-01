@@ -55,5 +55,26 @@ never "the driver is correct on hardware".
 |---|---|---|
 | `baseline` | PASS ×7 | includes two **clean-location** runs booted from `/tmp` with `build/` renamed away (F-22) |
 | `kasan` | PASS | `kasan: KernelAddressSanitizer initialized`; zero sanitizer reports |
-| `kcov` | not yet | builds (E-009); not booted |
+| `kcov` | PASS | **2882 distinct PCs** collected; none of them Kbase (F-23) |
 | `debug` | not started | |
+
+### The `kcov` logs are a debugging record, not a single result
+
+Eight `kcov` logs are retained rather than trimmed to the last one, because the
+sequence *is* the evidence for F-23's second half. Read in order they show a tool
+that reported plausible success while being wrong three separate times:
+
+| Log | What it shows |
+|---|---|
+| `…T093940Z` | first run: **no KCOV output at all** — `/init` never mounted `debugfs`, so `/sys/kernel/debug/kcov` did not exist |
+| `…T094138Z`, `…T094236Z` | same, after the `debugfs` mount was added |
+| `…T100901Z` | `KCOV_INIT_TRACE: Invalid argument` — the size was passed as a *pointer*; the ioctl wants the size **as the argument** |
+| `…T100931Z` | probe ran under KCOV, but `count`/`disable` were silently skipped — `run` consumed the rest of `argv` |
+| `…T101042Z` | `read /sys/kernel/debug/kcov: Invalid argument` — kcov has no `.read` handler at all |
+| `…T102417Z` | counters read, but `covered_pcs=656023` — a **popcount of a PC list**, meaningless |
+| `…T102818Z` | correct: `records=14495 distinct_pcs=2882`, `pc_range` entirely inside vmlinux text |
+
+Each failure was found by reading the reported errno, never by guessing. The
+final line to trust is the `PROBE summary`; for `kcov` also assert on
+`KCOV records=… distinct_pcs=…` and check the `pc_range` against vmlinux's own
+executable segment.
