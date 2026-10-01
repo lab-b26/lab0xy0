@@ -124,6 +124,51 @@ note() { printf '\n=== %s ===\n' "$*" | tee -a "$LOG"; }
 
 STAGE_MARK="$KERNEL_SRC/.kbase-staged"
 
+# Classify a Kconfig symbol against the pinned tree, so step 5 can say WHY a
+# fragment line did not take effect instead of always blaming a missing Kconfig
+# line. F-24: `CONFIG_DEBUG_INFO=y` was reported as "symbol not in the Kconfig",
+# which sent the reader hunting for a Kconfig line that in fact EXISTS at
+# lib/Kconfig.debug:227. It is a prompt-less derived `bool` that the
+# "Debug information" choice `select`s, so a config fragment can never set it.
+# The three outcomes are genuinely different problems with different fixes:
+#
+#   absent     the kernel does not have this symbol at all      -> wrong kernel
+#   invisible  it exists but has no prompt, so it is derived and
+#              not directly settable                           -> set the
+#              `select`ing symbol (usually a `choice` member) instead
+#   settable   it is a normal user-settable symbol but did not
+#              take effect                                    -> a `depends on`
+#              clause is unsatisfied, or a `choice` picked a sibling
+kconfig_symbol_kind() {
+    awk -v sym="$1" '
+        BEGIN { result = "absent"; inf = 0 }
+        $0 == "config " sym || $0 == "menuconfig " sym { inf = 1; result = "invisible"; next }
+        inf && (/^(menu)?config / || /^choice$/ || /^endchoice$/ || /^endmenu$/) { inf = 0 }
+        inf && /^[[:space:]]*(bool|tristate|int|hex|string)[[:space:]]+"/ { result = "settable"; exit }
+        END { print result }
+    ' $(find "$KERNEL_SRC" -name 'Kconfig*' -type f) 2>/dev/null
+}
+
+# One-line, actionable explanation of a fragment symbol that did not take.
+explain_missing() {
+    _sym="$1"; _want="$2"
+    case "$(kconfig_symbol_kind "$_sym")" in
+        invisible)
+            printf 'present but NOT user-settable (no prompt): it is a derived\n' >&2
+            printf '              symbol, almost always `select`ed by a choice member.\n' >&2
+            printf '              Set the member of that choice instead of %s.\n' "$_sym" >&2
+            printf '              (grep -rn "^config %s" for the stanza.)\n' "$_sym" >&2
+            ;;
+        settable)
+            printf 'user-settable but did NOT take effect: a `depends on` clause is\n' >&2
+            printf '              unsatisfied, or a `choice` selected a different member.\n' >&2
+            ;;
+        *)
+            printf 'not present in the pinned kernel Kconfig at all -> wrong kernel version?\n' >&2
+            ;;
+    esac
+}
+
 # --- 1. stage the Kbase payload -------------------------------------------
 note "1/8  staging the Kbase payload into the kernel tree"
 
@@ -266,17 +311,31 @@ while IFS= read -r line; do
                 elif grep -qx "# ${sym} is not set" "$OUT/.config"; then
                     printf '      [ ok      ] %-44s = n\n' "$sym"
                 else
-                    printf '      [ MISSING  ] %-44s wanted n — symbol not in the Kconfig\n' "$sym"
+                    printf '      [ MISSING  ] %-44s wanted n — %s\n' "$sym" \
+                        "$(kconfig_symbol_kind "$sym")"
                     failed=$((failed+1))
                 fi
             elif [ -z "$got" ]; then
-                printf '      [ MISSING  ] %-44s wanted %s — symbol not in the Kconfig\n' "$sym" "$want"
+                printf '      [ MISSING  ] %-44s wanted %s — %s\n' "$sym" "$want" \
+                    "$(kconfig_symbol_kind "$sym")"
+                explain_missing "$sym" "$want"
                 failed=$((failed+1))
             elif [ "$got" != "$want" ]; then
                 printf '      [ MISMATCH ] %-44s wanted %s, got %s\n' "$sym" "$want" "$got"
                 failed=$((failed+1))
             else
-                printf '      [ ok      ] %-44s = %s\n' "$sym" "$got"
+                # F-26: a prompt-less symbol cannot be set by this fragment at
+                # all. It can still be y because something else `select`s it, and
+                # a plain `[ ok ]` would credit the fragment for a value it did
+                # not produce. The result is right; the cause is not this line.
+                if [ "$(kconfig_symbol_kind "$sym")" = "invisible" ]; then
+                    printf '      [ ok*     ] %-44s = %s\n' "$sym" "$got"
+                    printf '%s\n' "      *INERT: $sym has no prompt, so this fragment did not set it."
+                    printf '%s\n' "      It is y because another symbol selects it. The requirement is"
+                    printf '%s\n' "      met, but not by this line. See analysis/findings.md F-26."
+                else
+                    printf '      [ ok      ] %-44s = %s\n' "$sym" "$got"
+                fi
             fi
             ;;
     esac
@@ -292,9 +351,11 @@ if [ "$failed" -ne 0 ]; then
        kernel without Kbase.
        Common causes:
          - Kbase was not staged into the kernel tree (check step 1/2 above)
-         - the kernel version does not expose the symbol
+         - the symbol is a derived, prompt-less symbol: set the `select`ing
+           symbol (usually a choice member) instead -- see F-24
          - a Kconfig 'depends on' clause is unsatisfied (e.g. MALI_EXPERT must be y
            before MALI_NO_MALI / LARGE_PAGE_SUPPORT are selectable)
+         - a `choice` selected a different member than the fragment names
        See analysis/findings.md."
 fi
 CONFIG_SHA=$(sha256sum "$OUT/.config" | awk '{print $1}')
