@@ -1289,9 +1289,66 @@ Recorded rather than silently left ambiguous.
 explaining what it means. A check that fires on correct documentation teaches its
 reader to ignore it, so D2 now matches only claim-shaped lines.
 
+## F-32 — VERIFIED: check B3 was vacuous — it found its evidence in the README that describes the evidence
+
+**Status: VERIFIED (defect found and fixed).** Category: `harness / claims`. The
+worst gap found in a check, in the project's own idiom of "a plausible green result
+that proves nothing".
+
+B3 exists so that a bundle calling itself `PORTABLE_ARTIFACT_VERIFIED` has a
+clean-location boot behind it. Its first implementation was:
+
+```bash
+if ! grep -rl 'clean-location\|renamed away\|with build/ renamed' \
+        research/boot-logs/ 2>/dev/null | grep -q .; then
+    ...fail...
+fi
+```
+
+`research/boot-logs/README.md` contains the phrase "clean-location" — it documents
+the procedure. So this check passed whenever *any* bundle claimed PORTABLE, and it
+would have passed if the claim had been made for all four bundles with zero
+clean-location boots ever performed: the "evidence" it sourced its green from was
+own documentation. It also never tied anything to the specific profile making the
+claim.
+
+**How it surfaced.** Not by failing — nothing was falsely passing yet; until the
+relocation tests ran, no second bundle made a PORTABLE claim. It surfaced on a
+re-read while landing P5 with the question "what would B3 say about the bundle I
+just promoted if the log were missing?" — the answer was "green, because the README
+matches". A check whose pass is independent of what it checks is indistinguishable
+from correct until someone runs the negative case. This is the F-23/F-31 shape
+exactly, and it is why `check/selftest.sh` exists and now has two B3 cases.
+
+**Fix.** PORTABLE claims now verify per-bundle: the manifest must name its evidence in a
+`clean_location_log` field; the named log must exist on disk; the log must contain
+the full `passed=0x1ff` probe signature **and** a `CLEAN-LOCATION: <profile>`
+marker naming that profile. `check/portable-test.sh` writes that marker, and
+`package-artifact.sh --promote-to PORTABLE_ARTIFACT_VERIFIED` refuses a log that
+lacks it — so writing, checking, and promoting all hang off the same string and
+cannot silently drift apart.
+
+**Also found while landing it and recorded so it is not mistaken for a hidden
+cost:** the first promotion run edited three manifests and then died mid-script
+(`write_bundle_readme: command not found` — the function's definition sat after its
+first call site), leaving their SHA256SUMS stale. B1 went red on exactly those
+files. Nothing else needed to notice. That is the integrity tier doing the one job
+it exists for.
+
 ## F-28 — VERIFIED: `SHA256SUMS` does not cover the bundle's own `README.md`
 
-**Status: VERIFIED (gap found by `check/selftest.sh`, not yet fixed).**
+**Status: VERIFIED (gap found by `check/selftest.sh`), now RESOLVED.**
+Resolution: the cause turned out to be an *ordering accident*, not a policy choice —
+`package-artifact.sh` generated `metadata/SHA256SUMS` and only afterwards wrote
+`README.md`, so the file simply did not exist yet when the sums were taken. Both
+paths (packaging and promotion) now write the sums last, and all four bundles had
+their sums regenerated through the promotion machinery (`--promote-to`), which was
+added for unrelated reasons and is why the "do not reset baseline's earned state"
+objection collapsed: raising a claim no longer requires re-collecting from `build/`.
+`README.md` is inside the integrity set of every bundle on disk.
+
+The original deferral reasoning below is kept because *the trade-off was real*; it
+just stopped being binding once promotion existed.
 Category: `artifact integrity`. Severity: **low, and deliberately not
 overstated** — no payload file is unprotected, so no code or kernel image can be
 silently altered. Only the human-facing description of the bundle is.

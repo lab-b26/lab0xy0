@@ -126,13 +126,18 @@ is kept fuzzer-agnostic.
 ## Current status
 
 ```text
-artifacts produced:   3
+artifacts produced:   4
   baseline            PORTABLE_ARTIFACT_VERIFIED   (DISCOVERY-ONLY, DECISION-1)
-  kcov                TARGET_VERIFIED               (DISCOVERY-ONLY, DECISION-1)
-  debug               TARGET_VERIFIED               (DISCOVERY-ONLY, DECISION-1)
-  kasan               built + booted (logs kept); bundle NOT packaged
+  kcov                PORTABLE_ARTIFACT_VERIFIED   (DISCOVERY-ONLY, DECISION-1)
+  debug               PORTABLE_ARTIFACT_VERIFIED   (DISCOVERY-ONLY, DECISION-1)
+  kasan               PORTABLE_ARTIFACT_VERIFIED   (DISCOVERY-ONLY, DECISION-1)
 program state:        NOT_STARTED (see ../research/state.md)
 ```
+
+Every bundle now carries a `clean_location_log` in its manifest naming the exact
+boot log that earned the state (the `*-<profile>-PORTABLE.log` files), and every
+bundle's `SHA256SUMS` covers `README.md` itself (the F-28 hole is closed for all
+four, via `--promote-to` regenerating the sums AFTER the README is written).
 
 ### `artifacts/baseline` — the first artifact
 
@@ -143,13 +148,12 @@ validation    PORTABLE_ARTIFACT_VERIFIED
 scope class   DISCOVERY-ONLY
 ```
 
-It passed the full procedure above: packaged, copied to a location outside the
-repository, and booted **with the entire `build/` tree renamed away**, so the
-result cannot be an accident of the build tree still being present. All five
-`verify-boot.sh` assertions passed from that clean location, and
-`sha256sum -c metadata/SHA256SUMS` reports 16/16 OK. Evidence and the one real
-portability defect this surfaced (the rootfs was still resolved from `build/`)
-are in F-22 of `../analysis/findings.md`.
+It passed the full procedure above — twice, in fact: once when it was packaged
+(F-22), and again after its build tree was pruned to reclaim disk, when the same
+test was re-run end-to-end through the now-automated `../../check/portable-test.sh`.
+Re-running after the prune is the interesting half: it proves the *bundle only* is
+sufficient, with no tree at all behind it (`sha256sum -c` clean before and after;
+`20261001T184229Z-baseline-PORTABLE.log`).
 
 Rebuild it with:
 
@@ -165,24 +169,24 @@ states outside the table above so "portable" can never be asserted by accident.
 
 ```text
 identity      kbase-r54p0-01eac0-6.12.111-kcov
-size          80 MB, 16 files
-validation    TARGET_VERIFIED
+size          ~80 MB
+validation    PORTABLE_ARTIFACT_VERIFIED
 scope class   DISCOVERY-ONLY
-integrity     16/16 OK
 ```
 
-Packaged and integrity-checked, but **not** clean-location tested, so it is not
-`PORTABLE_ARTIFACT_VERIFIED`. Note also that this artifact is
-`TARGET_VERIFIED` while its *purpose* — coverage — is only partly served: KCOV
-works (2882 distinct PCs), but none of that coverage is Kbase (F-23). A consumer
-must not read `TARGET_VERIFIED` as "coverage-guided fuzzing is ready here".
+Clean-location booted and promoted (`clean_location_log` in its manifest names the
+attesting log). **This bundle's purpose is still only partly served:** KCOV works
+(2882 distinct PCs collected in F-23), but none of that coverage is Kbase — every
+PC lies inside vmlinux and Kbase contributed zero. A consumer using this bundle for
+coverage guidance is optimising kernel paths, not the driver. Closing that gap is
+F-2 (P6 in `../TODO.md`) and remains **open**.
 
 ### Per-profile status of the other two
 
 | Profile | Built | Booted + probed | Bundle |
 |---|---|---|---|
-| `kasan` | yes | yes — `passed=0x1ff failed=0x000`, **zero** KASAN reports | not packaged (build tree pruned to save disk) |
-| `debug` | yes | yes — `passed=0x1ff failed=0x000`; DWARF5 confirmed in `vmlinux` | `TARGET_VERIFIED`, 460 MB |
+| `kasan` | yes | yes — `passed=0x1ff failed=0x000`; `KernelAddressSanitizer initialized`; **zero** KASAN reports | `PORTABLE_ARTIFACT_VERIFIED`, 134 MB (module 2.4 → 5.1 MB under instrumentation) |
+| `debug` | yes | yes — `passed=0x1ff failed=0x000`; DWARF5 confirmed in `vmlinux` (`.debug_rnglists` et al, `Version: 5`) | `PORTABLE_ARTIFACT_VERIFIED`, 460 MB |
 
 `debug`'s bundle is large because it ships `vmlinux` with full DWARF5 debug info —
 which is the entire reason the profile exists. `mali_kbase.ko` alone is 53 MB there
@@ -194,18 +198,26 @@ misconfiguration.
 `check/check-all.sh --tier B` re-derives, for every bundle on disk:
 `SHA256SUMS` still matches (B1); the manifest has every required field and names a
 state that is actually in the ladder (B2); a `PORTABLE_ARTIFACT_VERIFIED` claim is
-backed by a clean-location log (B3); no file references an absolute `build/` path
-(B4); and the scope class is `DISCOVERY-ONLY` (B5). `check/selftest.sh` proves each
-of those checks goes red when its defect is re-injected, so a green run is not
-merely a checker that has never been tested.
+backed by *its own named evidence* — the manifest must carry a `clean_location_log`
+field, the named log must exist, contain the full PROBE pass, and carry a
+`CLEAN-LOCATION: <profile>` marker for THAT profile (B3); no file references an
+absolute `build/` path (B4); and the scope class is `DISCOVERY-ONLY` (B5).
+`check/selftest.sh` proves each of those checks goes red when its defect is
+re-injected, so a green run is not merely a checker that has never been tested.
 
-**Known gap (F-28):** `SHA256SUMS` covers every payload file but **not** the
-bundle's own `README.md` — which is where the bundle states its `validation_status`
-and `scope_class`. So `sha256sum -c` would pass on a bundle whose README described
-different contents. Left open deliberately: covering it means re-packaging every
-bundle, which resets `artifacts/baseline` from `PORTABLE_ARTIFACT_VERIFIED` and
-requires its clean-location boot again. Trading an earned state for a
-documentation-integrity nicety is a bad trade.
+The first B3 was vacuous: it searched all of `research/boot-logs/` for the words
+"clean-location" and found them in that directory's own README, so any bundle could
+have claimed PORTABLE and passed. The per-bundle evidence requirement is what makes
+the claim falsifiable.
+
+**F-28 is closed.** `SHA256SUMS` used to be written *before* `README.md` existed —
+not a policy choice, an ordering accident — so the one file stating
+`validation_status` and `scope_class` sat outside the integrity set. The packaging
+and promotion paths now both write the sums last, and all four bundles' sums cover
+`README.md`. The earlier reason to leave it open (re-packaging would reset
+baseline's earned state) is gone: `--promote-to` exists precisely so a claim can be
+raised — or, here, the integrity boundary widened — without tearing the state down
+and rebuilding.
 
 ### The portability test must use `--strict-artifact`
 

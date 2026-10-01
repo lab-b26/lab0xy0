@@ -35,7 +35,7 @@ die()  { printf '\nerror: %s\n' "$*" >&2; exit 1; }
 note() { printf '\n=== %s\n' "$*"; }
 log()  { printf '      %s\n' "$*"; }
 
-PROFILE=""; OUT=""; VALIDATION_STATE="BUILT"
+PROFILE=""; OUT=""; VALIDATION_STATE="BUILT"; PROMOTE_TO=""; EVIDENCE=""
 usage() { sed -n '3,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
@@ -43,6 +43,8 @@ while [ $# -gt 0 ]; do
         --profile)          PROFILE="${2:-}"; shift 2 ;;
         --out)              OUT="${2:-}"; shift 2 ;;
         --validation-state) VALIDATION_STATE="${2:-}"; shift 2 ;;
+        --promote-to)       PROMOTE_TO="${2:-}"; shift 2 ;;
+        --evidence)         EVIDENCE="${2:-}"; shift 2 ;;
         -h|--help)          usage; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
@@ -61,11 +63,152 @@ case "$VALIDATION_STATE" in
     *) die "unknown validation state: $VALIDATION_STATE" ;;
 esac
 
+[ -n "$OUT" ] || OUT="$REPO_ROOT/artifacts/$PROFILE"
+
+# write_bundle_readme -- generated README for the bundle. Shared by the
+# packaging path and the promotion path; if the two ever generated different text,
+# a promoted bundle would describe a different lifecycle than a packaged one.
+write_bundle_readme() {
+cat > "$OUT/README.md" <<EOF
+# Artifact — \`${PROFILE}\`
+
+\`kbase-${KBASE_RELEASE}\` on Linux \`${KERNEL_VERSION}\`, profile \`${PROFILE}\`.
+
+| | |
+|---|---|
+| validation status | **${VALIDATION_STATE}** |
+| scope class | **${SCOPE_CLASS}** (DECISION-1: INVESTIGATION-ONLY) |
+| kernel image | \`kernel/bzImage\` |
+| symbols | \`kernel/vmlinux\` |
+| config | \`kernel/config\` (sha256 \`${CONFIG_SHA:0:12}…\`) |
+| Kbase module | \`modules/${KMOD_REL}\` |
+| rootfs | \`rootfs/rootfs-${PROFILE}.cpio.gz\` |
+| manifest | \`metadata/manifest.json\` |
+| integrity | \`metadata/SHA256SUMS\` |
+
+## Run it
+
+\`\`\`bash
+# from anywhere; no repo needed
+qemu-system-x86_64 -machine q35 -m 2048 -smp 4 -no-reboot \\
+  -kernel kernel/bzImage \\
+  -initrd rootfs/rootfs-${PROFILE}.cpio.gz \\
+  -append "console=ttyS0 panic=-1 rdinit=/init loglevel=7" \\
+  -enable-kvm -nographic
+
+# or, with this repo's wrappers
+qemu/scripts/run.sh --profile ${PROFILE} --artifact <this directory>
+qemu/scripts/verify-boot.sh --profile ${PROFILE} --artifact <this directory>
+\`\`\`
+
+Add \`-accel tcg -cpu max\` instead of \`-enable-kvm\` where KVM is unavailable.
+
+## Verify integrity
+
+\`\`\`bash
+sha256sum -c metadata/SHA256SUMS
+\`\`\`
+
+## What ${VALIDATION_STATE} does and does not mean
+
+$(case "$VALIDATION_STATE" in
+  BUILT)                  echo "It was compiled. Nothing has been booted." ;;
+  BOOT_VERIFIED)          echo "It boots. The Kbase module has NOT been shown to load." ;;
+  KBASE_LOAD_VERIFIED)    echo "It boots and Kbase loads. The ioctl surface has NOT been exercised." ;;
+  TARGET_VERIFIED)        echo "It boots, Kbase loads, and /dev/mali0 ioctls respond. Portability has NOT been tested." ;;
+  PORTABLE_ARTIFACT_VERIFIED) echo "It additionally passed the clean-location test: booted from a copy with the build tree unavailable." ;;
+esac)
+
+Per **DECISION-1** this bundle is **DISCOVERY-ONLY** regardless of validation
+status. It is \`MALI_NO_MALI\` on x86_64; results from it must be re-confirmed on
+conforming real hardware before they mean anything.
+EOF
+}
+
+# ---- promotion mode: raise an EXISTING bundle's validation_status -----------
+# No build tree is touched or needed. This exists because a bundle that has
+# passed the clean-location test must be able to record that AFTER its build
+# tree was pruned to reclaim disk -- requiring build/ here would make the disk
+# choreography in TODO.md impossible.
+#
+# A promotion is a CLAIM, so it carries evidence:
+#   - the target must sit at or above the current rung on this tool's ladder
+#     (demotion is a deliberate re-packaging with a lower --validation-state,
+#     never a side effect of this flag);
+#   - PORTABLE_ARTIFACT_VERIFIED additionally requires --evidence <log>, and
+#     that log must contain the full PROBE pass signature AND a
+#     "CLEAN-LOCATION: <profile>" marker. A log from a different profile, or
+#     one whose boot did not reach PROBE 0x1ff, is not evidence THIS bundle is
+#     portable. check/check-all.sh B3 re-verifies all of it.
+if [ -n "$PROMOTE_TO" ]; then
+    _MF="$OUT/metadata/manifest.json"
+    [ -f "$_MF" ] || die "no bundle at $OUT to promote (no metadata/manifest.json)"
+    _CUR=$(sed -n 's/.*"validation_status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_MF" | head -1)
+    [ -n "$_CUR" ] || die "no readable validation_status in $_MF"
+
+    # NOTE: this ordering is THIS TOOL's ladder (package-time vocabulary).
+    # artifacts/README.md names the same rung QEMU_BOOT_VERIFIED where this tool
+    # says BOOT_VERIFIED. Only PORTABLE_ARTIFACT_VERIFIED is promoted to in
+    # practice, so the two vocabularies never compare rung-for-rung here.
+    _LAD="BUILT BOOT_VERIFIED KBASE_LOAD_VERIFIED TARGET_VERIFIED PORTABLE_ARTIFACT_VERIFIED"
+    _lad_pos() { local w="$1" s n=0; for s in $_LAD; do n=$((n+1)); [ "$s" = "$w" ] && { echo $n; return; }; done; echo 0; }
+    _CN=$(_lad_pos "$_CUR"); _TN=$(_lad_pos "$PROMOTE_TO")
+    [ "$_TN" -gt 0 ] || die "unknown promote target: $PROMOTE_TO"
+    [ "$_CN" -gt 0 ] || die "bundle current state '$_CUR' is not on the ladder"
+    [ "$_TN" -lt "$_CN" ] && die "refusing to demote: $_CUR is rung $_CN, target $PROMOTE_TO is rung $_TN"
+
+    if [ "$PROMOTE_TO" = PORTABLE_ARTIFACT_VERIFIED ]; then
+        [ -n "$EVIDENCE" ] || die "promotion to PORTABLE_ARTIFACT_VERIFIED requires --evidence <clean-location log>"
+        [ -f "$EVIDENCE" ] || die "evidence log not found: $EVIDENCE"
+        grep -qE 'PROBE summary[[:space:]]+passed=0x1ff[[:space:]]+failed=0x000' "$EVIDENCE" \
+            || die "evidence $EVIDENCE contains no full PROBE pass (passed=0x1ff)"
+        grep -q "CLEAN-LOCATION: $PROFILE" "$EVIDENCE" \
+            || die "evidence $EVIDENCE has no 'CLEAN-LOCATION: $PROFILE' marker -- it does not attest THIS bundle"
+    fi
+
+    note "promoting $OUT : $_CUR -> $PROMOTE_TO"
+    # Re-read identity from the existing manifest: the build tree may be gone.
+    read -r KERNEL_VERSION KBASE_RELEASE CONFIG_SHA KMOD_REL SCOPE_CLASS < <(
+        python3 - "$_MF" <<'PYEOF'
+import json, sys
+m = json.load(open(sys.argv[1]))
+print(m["kernel_release"], m["kbase_release"], m["kernel_config_sha256"],
+      m["modules"]["kbase"].removeprefix("modules/"), m["scope_class"])
+PYEOF
+    )
+    VALIDATION_STATE="$PROMOTE_TO"
+
+    # Record the evidence in the manifest rather than merely asserting it --
+    # a later reader must be able to open the log, not trust this script.
+    python3 - "$_MF" "$PROMOTE_TO" "$EVIDENCE" <<'PYEOF'
+import json, sys, datetime
+p, state, ev = sys.argv[1], sys.argv[2], sys.argv[3]
+m = json.load(open(p))
+m["validation_status"] = state
+m["promoted_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+if ev: m["clean_location_log"] = ev
+json.dump(m, open(p, "w"), indent=2)
+open(p, "a").write("\n")
+PYEOF
+
+    write_bundle_readme
+    log "README.md (regenerated for $PROMOTE_TO)"
+
+    # Sums AFTER README so the file that states the status is itself defended.
+    ( cd "$OUT" && find . -type f ! -name SHA256SUMS -print0 \
+        | sort -z | xargs -0 sha256sum > metadata/SHA256SUMS )
+    log "metadata/SHA256SUMS ($(wc -l < "$OUT/metadata/SHA256SUMS") files)"
+    note "done"
+    log "state: $PROMOTE_TO   scope: $SCOPE_CLASS"
+    exit 0
+fi
+
 BUILD="$BUILD_ROOT/$PROFILE"
 [ -d "$BUILD" ] || die "no build tree for profile '$PROFILE' at $BUILD
 Build it first:  kernel/scripts/build.sh --profile $PROFILE"
 
-[ -n "$OUT" ] || OUT="$REPO_ROOT/artifacts/$PROFILE"
+
+
 
 # --- every required input must exist BEFORE we create anything --------------
 note "checking inputs"
@@ -187,66 +330,18 @@ cat > "$OUT/metadata/manifest.json" <<EOF
 EOF
 log "metadata/manifest.json"
 
+
+# README is written BEFORE the sums: the previous order generated the sums
+# first, leaving README.md -- the file that STATES validation_status and
+# scope_class -- outside the integrity set (F-28). sha256sum -c must defend it.
+write_bundle_readme
+log "README.md"
+
 # SHA256SUMS over everything except itself, so `sha256sum -c` works from inside.
 ( cd "$OUT" && find . -type f ! -name SHA256SUMS -print0 \
     | sort -z | xargs -0 sha256sum > metadata/SHA256SUMS )
 log "metadata/SHA256SUMS ($(wc -l < "$OUT/metadata/SHA256SUMS") files)"
 
-cat > "$OUT/README.md" <<EOF
-# Artifact — \`${PROFILE}\`
-
-\`kbase-${KBASE_RELEASE}\` on Linux \`${KERNEL_VERSION}\`, profile \`${PROFILE}\`.
-
-| | |
-|---|---|
-| validation status | **${VALIDATION_STATE}** |
-| scope class | **${SCOPE_CLASS}** (DECISION-1: INVESTIGATION-ONLY) |
-| kernel image | \`kernel/bzImage\` |
-| symbols | \`kernel/vmlinux\` |
-| config | \`kernel/config\` (sha256 \`${CONFIG_SHA:0:12}…\`) |
-| Kbase module | \`modules/${KMOD_REL}\` |
-| rootfs | \`rootfs/rootfs-${PROFILE}.cpio.gz\` |
-| manifest | \`metadata/manifest.json\` |
-| integrity | \`metadata/SHA256SUMS\` |
-
-## Run it
-
-\`\`\`bash
-# from anywhere; no repo needed
-qemu-system-x86_64 -machine q35 -m 2048 -smp 4 -no-reboot \\
-  -kernel kernel/bzImage \\
-  -initrd rootfs/rootfs-${PROFILE}.cpio.gz \\
-  -append "console=ttyS0 panic=-1 rdinit=/init loglevel=7" \\
-  -enable-kvm -nographic
-
-# or, with this repo's wrappers
-qemu/scripts/run.sh --profile ${PROFILE} --artifact <this directory>
-qemu/scripts/verify-boot.sh --profile ${PROFILE} --artifact <this directory>
-\`\`\`
-
-Add \`-accel tcg -cpu max\` instead of \`-enable-kvm\` where KVM is unavailable.
-
-## Verify integrity
-
-\`\`\`bash
-sha256sum -c metadata/SHA256SUMS
-\`\`\`
-
-## What ${VALIDATION_STATE} does and does not mean
-
-$(case "$VALIDATION_STATE" in
-  BUILT)                  echo "It was compiled. Nothing has been booted." ;;
-  BOOT_VERIFIED)          echo "It boots. The Kbase module has NOT been shown to load." ;;
-  KBASE_LOAD_VERIFIED)    echo "It boots and Kbase loads. The ioctl surface has NOT been exercised." ;;
-  TARGET_VERIFIED)        echo "It boots, Kbase loads, and /dev/mali0 ioctls respond. Portability has NOT been tested." ;;
-  PORTABLE_ARTIFACT_VERIFIED) echo "It additionally passed the clean-location test: booted from a copy with the build tree unavailable." ;;
-esac)
-
-Per **DECISION-1** this bundle is **DISCOVERY-ONLY** regardless of validation
-status. It is \`MALI_NO_MALI\` on x86_64; results from it must be re-confirmed on
-conforming real hardware before they mean anything.
-EOF
-log "README.md"
 
 note "done"
 du -sh "$OUT"

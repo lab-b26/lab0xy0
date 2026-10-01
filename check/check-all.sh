@@ -652,12 +652,26 @@ b3_portable_claim_backed() {
     for a in $_artifacts; do
         _m="$a/metadata/manifest.json"
         [ -f "$_m" ] || continue
-        if grep -q 'PORTABLE_ARTIFACT_VERIFIED' "$_m" 2>/dev/null; then
-            # must be backed by a clean-location boot log
-            if ! grep -rl 'clean-location\|renamed away\|with build/ renamed' research/boot-logs/ 2>/dev/null | grep -q .; then
-                _bad="$_bad\n    $(basename $a) claims PORTABLE but no clean-location log found"
-            fi
+        grep -q '"validation_status"[[:space:]]*:[[:space:]]*"PORTABLE_ARTIFACT_VERIFIED"' "$_m" 2>/dev/null || continue
+        _p=$(basename "$a")
+        # The manifest must NAME its evidence, and the named log must attest THIS
+        # bundle: a full PROBE pass, and a CLEAN-LOCATION marker carrying the
+        # profile name. The first version of this check searched the whole
+        # boot-logs directory for the word "clean-location" and found it in
+        # README.md itself -- any bundle could then claim PORTABLE and pass.
+        _ev=$(sed -n 's/.*"clean_location_log"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_m" | head -1)
+        if [ -z "$_ev" ]; then
+            _bad="$_bad\n    $_p claims PORTABLE_ARTIFACT_VERIFIED but records no clean_location_log"
+            continue
         fi
+        if [ ! -f "$_ev" ]; then
+            _bad="$_bad\n    $_p: clean_location_log '$_ev' does not exist"
+            continue
+        fi
+        grep -qE 'PROBE summary[[:space:]]+passed=0x1ff[[:space:]]+failed=0x000' "$_ev" || \
+            _bad="$_bad\n    $_p: '$_ev' contains no full PROBE pass (passed=0x1ff)"
+        grep -q "CLEAN-LOCATION: $_p" "$_ev" || \
+            _bad="$_bad\n    $_p: '$_ev' has no 'CLEAN-LOCATION: $_p' marker -- it may attest a different bundle"
     done
     [ -z "$_bad" ] || { printf '%b\n' "$_bad" >&2; return 1; }
     return 0

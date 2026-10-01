@@ -6,6 +6,7 @@ Two scripts:
 |---|---|
 | `check/check-all.sh` | "are the claims this repository makes still true?" |
 | `check/selftest.sh` | "would those checks notice if they were wrong?" |
+| `check/portable-test.sh <p>` | "is this bundle self-contained *if the repo's build tree vanishes*?" |
 
 Both exit non-zero on failure so either can gate a commit or a CI step.
 
@@ -74,7 +75,10 @@ failure.
 
 **A7 also writes the README table.** It caught `kasan.config` and `kcov.config`
 still claiming `NOT BUILT` after both had been built and booted — stale in the
-*understating* direction, which is just as wrong.
+*understating* direction, which is just as wrong. And when P4/P5 landed, A7 and A8
+both fired on the documentation that described three bundles and a "not packaged"
+kasan *after* four bundles existed: the table was updated to the truth, not the
+check to the table.
 
 **A12 reads `TODO.md`.** A task list where `DONE` is an assertion is a wish list.
 Every `DONE` step must carry an `Evidence:` line, every repo path inside it must
@@ -142,12 +146,27 @@ re-injects each historical defect and asserts the named check goes **red**:
 | vendor | a byte appended to a vendor patch | A5 |
 | F-28 | a byte appended to a `SHA256SUMS`-covered bundle file | B1 |
 | F-31 | hide a bundle's `bzImage`; `--strict-artifact` must **refuse** | C1 |
+| F-32 | `PORTABLE` bundle with its `clean_location_log` field deleted | B3 |
+| F-32b | the evidence log's marker mutated to name another bundle | B3 |
+| — | promotion requested with no `--evidence` at all | promote tool |
+| — | promotion with *another profile's* clean-location log | promote tool |
 | — | a `DONE` task citing a check that does not exist | A12 |
 | — | a check range spanning the two ladders (`A2-B5`) | A12 |
 | — | a `DONE` task whose `Evidence:` line was deleted | A12 |
 | — | a **missing** path on a *wrapped* `Evidence:` continuation line | A12 |
 
-Current result: **19 proven, 0 not-proven, 4 clean-tree positive controls.**
+`check/portable-test.sh` deserves a line of its own: it is the *executable form*
+of the clean-location procedure. For a bundle it verifies `sha256sum -c`, copies
+the bundle to `/tmp/portable-test-<profile>/`, renames the repository's `build/`
+tree away (restored by trap on `EXIT`/`INT`/`TERM`), boots the copy with
+`--strict-artifact`, requires the full PROBE pass, appends the `CLEAN-LOCATION:
+<profile>` marker to the log, and re-verifies the original bundle afterwards.
+`package-artifact.sh --promote-to PORTABLE_ARTIFACT_VERIFIED --evidence <log>`
+then refuses any log without that marker — and promotion works with the build
+tree gone, so a bundle can be promoted *after* its tree is pruned (which is the
+only reason pruning `build/baseline` was ever safe).
+
+Current result: **23 proven, 0 not-proven, 4 clean-tree positive controls.**
 
 Note the F-28 case: its first version tampered with a bundle's `README.md` and B1
 stayed green. The instinct is to suspect the check; here the check was right and the

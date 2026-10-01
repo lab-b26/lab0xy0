@@ -53,10 +53,29 @@ never "the driver is correct on hardware".
 
 | Profile | Result | Notes |
 |---|---|---|
-| `baseline` | PASS ×7 | includes two **clean-location** runs booted from `/tmp` with `build/` renamed away (F-22) |
-| `kasan` | PASS | `kasan: KernelAddressSanitizer initialized`; zero sanitizer reports |
-| `kcov` | PASS | **2882 distinct PCs** collected; none of them Kbase (F-23) |
-| `debug` | PASS | `MALI_KUTF` off (F-27); DWARF5 confirmed in `vmlinux`, not just the config |
+| `baseline` | PASS ×7 BOOT + **PORTABLE** | earlier runs include two clean-location boots (F-22); the PORTABLE log is the automated re-run after `build/baseline` was pruned |
+| `kasan` | PASS ×2 BOOT + **PORTABLE** | `kasan: KernelAddressSanitizer initialized`; **zero** sanitizer reports in both runs; rebuilt tree after the first was pruned |
+| `kcov` | PASS ×7 BOOT + **PORTABLE** | **2882 distinct PCs** collected; none of them Kbase (F-23); 8th BOOT log is the retained partial (`KCOV_INIT_TRACE: Invalid argument`) |
+| `debug` | PASS BOOT + **PORTABLE** | `MALI_KUTF` off (F-27); DWARF5 confirmed in `vmlinux`, not just the config |
+
+### The `*-PORTABLE.log` files are the portability evidence
+
+Four logs — `20261001T184229Z-baseline`, `…T184518Z-kcov`, `…T184706Z-debug`,
+`…T185000Z-kasan`, all `-PORTABLE.log` — are produced by
+`check/portable-test.sh`, which copies the bundle to `/tmp/portable-test-<profile>/`,
+renames the repository's `build/` tree away, boots the copy with
+`--strict-artifact`, requires the full PROBE pass, and then appends:
+
+```text
+CLEAN-LOCATION: <profile>
+```
+
+That marker line is load-bearing: `package-artifact.sh --promote-to
+PORTABLE_ARTIFACT_VERIFIED` refuses an evidence log without it, and
+`check/check-all.sh` B3 re-reads the named log from each promoted bundle's
+manifest and requires both the marker and the `passed=0x1ff` signature. A PORTABLE
+claim, a clean-location log, and a promoted manifest now agree with each other or
+the harness goes red.
 
 ### The `kcov` logs are a debugging record, not a single result
 

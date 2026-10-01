@@ -237,9 +237,25 @@ expect_fail "F-25 header claims BUILT, nothing built" A7 A
 rm -f kernel/configs/ghost.config
 
 # --- F-25b: a documented count that does not match disk ------------------------
+# Do NOT hardcode the current count: this case once sed-matched 'produced:   3'
+# and silently stopped firing when a fourth bundle appeared. Read the true count,
+# then corrupt it -- the test has to break whenever the doc lies, at any number.
 snapshot artifacts/README.md
-sed -i 's/^artifacts produced:   3/artifacts produced:  99/' artifacts/README.md
-expect_fail "F-25b documented count is wrong" A7 A
+_n=$(sed -n 's/^artifacts produced:[[:space:]]*\([0-9]*\).*/\1/p' artifacts/README.md | head -1)
+[ -n "$_n" ] || { printf '  %sSKIP%s  %-40s no artifacts count line in README\n' "$C_YLW" "$C_OFF" "F-25b documented count is wrong"; }
+if [ -n "$_n" ]; then
+    sed -i "s/^artifacts produced:[[:space:]]*${_n}/artifacts produced:  $((_n + 90))/" artifacts/README.md
+    grep -qE '^artifacts produced:  [0-9]+' artifacts/README.md \
+        && {
+            # A7 must not fail vacuously: the counted text line must be decisive.
+            if sed -n "s/^artifacts produced:[[:space:]]*\([0-9]*\).*/\1/p" artifacts/README.md | grep -qx "$((_n + 90))"; then
+                expect_fail "F-25b documented count is wrong" A7 A
+            else
+                printf '  %sNOT PROVEN%s  %-40s count line was not actually changed\n' "$C_YLW" "$C_OFF" "F-25b documented count is wrong"
+                NOTPROVEN=$((NOTPROVEN+1))
+            fi
+        }
+fi
 cp -p "$BACKUP/artifacts/README.md" artifacts/README.md
 
 # --- A8: citing a boot log that does not exist ---------------------------------
@@ -348,6 +364,46 @@ if [ -n "$_bundle" ]; then
 else
     printf '  %sSKIP%s  %-40s no bundle with a kernel image to hide\n' \
            "$C_YLW" "$C_OFF" "F-31 strict mode refuses build/ fallback"
+fi
+
+# --- B3: a PORTABLE claim whose evidence field is missing --------------------
+# First B3 searched the whole boot-logs directory for the word "clean-location"
+# and found it in the README itself: any bundle could then claim PORTABLE. The
+# current B3 requires the manifest to name its evidence and the evidence to
+# attest THIS bundle. Two cases: field deleted, and log's marker mutated.
+_b=$(ls -d artifacts/*/ | head -1)
+_bp=$(basename "$_b")
+if grep -q '"PORTABLE_ARTIFACT_VERIFIED"' "$_b/metadata/manifest.json" \
+       && grep -q '"clean_location_log"' "$_b/metadata/manifest.json"; then
+    snapshot "$_b/metadata/manifest.json"
+    sed -i '/"clean_location_log"/d' "$_b/metadata/manifest.json"
+    expect_fail "B3  PORTABLE claim records no evidence" B3 B
+    cp -p "$BACKUP/${_b}metadata/manifest.json" "$_b/metadata/manifest.json"
+
+    # same claim, but the named log must attest THIS bundle: corrupt its marker
+    _bp_log=$(python3 -c "import json;print(json.load(open('$_b/metadata/manifest.json'))['clean_location_log'])")
+    if [ -f "$_bp_log" ]; then
+        snapshot "$_bp_log"
+        sed -i "s/^CLEAN-LOCATION: $_bp$/CLEAN-LOCATION: not-this-profile/" "$_bp_log"
+        expect_fail "B3  evidence attests a different bundle" B3 B
+        cp -p "$BACKUP/$_bp_log" "$_bp_log"
+    fi
+else
+    printf '  %sSKIP%s  %-40s no PORTABLE bundle to mutate\n' "$C_YLW" "$C_OFF" "B3 evidence cases"
+fi
+
+# --- F-31 module: the promotion tool's refusals ------------------------------
+# Promote is a CLAIM, and the tool must refuse without evidence. These cases run
+# the tool's own gates, not a tier: no log at all, and a log from another profile.
+_b2=$(ls -d artifacts/*/ | head -1); _b2p=$(basename "$_b2")
+if grep -q '"PORTABLE_ARTIFACT_VERIFIED"' "$_b2/metadata/manifest.json"; then
+    expect_refuses "promote refuses missing --evidence" \
+        qemu/scripts/package-artifact.sh --profile "$_b2p" --promote-to PORTABLE_ARTIFACT_VERIFIED
+    _other=$(ls research/boot-logs/*-PORTABLE.log 2>/dev/null | grep -v -- "-$_b2p-" | head -1)
+    if [ -n "$_other" ]; then
+        expect_refuses "promote refuses another profile's log" \
+            qemu/scripts/package-artifact.sh --profile "$_b2p" --promote-to PORTABLE_ARTIFACT_VERIFIED --evidence "$_other"
+    fi
 fi
 
 printf '\n'

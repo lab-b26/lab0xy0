@@ -109,7 +109,7 @@ Tiers, chosen so the cheap ones need no toolchain and no QEMU:
 | C | QEMU | boots each packaged artifact through `verify-boot.sh` (5 assertions) **with `--strict-artifact`**, so a bundle cannot silently borrow from `build/` |
 | D | nothing | `research/state.md` ledger consistency, and per-ledger state validation (D2 project, D3 artifact) |
 
-Current result: **23 passed, 0 failed, 0 skipped** (`--all`, including three real
+Current result: **24 passed, 0 failed, 0 skipped** (`--all`, including four real
 QEMU boots).
 
 The checks have earned their keep by finding things, which is the only reason to
@@ -142,7 +142,7 @@ refuse a missing bundle file), and four A12 cases (a dangling check ID, a range
 spanning two ladders, a `DONE` task with no evidence, a missing path on a wrapped
 evidence line).
 
-**Current result: 19 proven, 0 not-proven, 4 clean-tree positive controls.**
+**Current result: 23 proven, 0 not-proven, 4 clean-tree positive controls.**
 
 Three design points that are load-bearing:
 
@@ -187,58 +187,59 @@ the profile working, not misconfiguration.
 
 ## P4 — `kasan`: rebuild, boot, package
 
-Status: NOT STARTED
-Evidence: —
+Status: DONE
+Evidence: `build/logs/kasan-rebuild.log`; `research/boot-logs/20261001T173049Z-kasan-BOOT.log`;
+`artifacts/kasan/metadata/manifest.json`
 Checks: A2, A7, B1–B5, C1
 
-`kasan` was built and booted (KASAN initialized, 5/5, zero reports, module
-2.4 MB → 5.1 MB) but the **build tree was pruned** and **no bundle was ever
-created**. So there is nothing to check the integrity of, and the state is
-`TARGET_VERIFIED`-on-a-tree-that-no-longer-exists. Rebuild (~15 min), boot,
-package. Do not prune `build/baseline` first without confirming
-`artifacts/baseline` still passes tier B — it is the only bundle currently at
-`PORTABLE_ARTIFACT_VERIFIED`.
+- [x] `build/baseline` pruned *after* confirming its bundle still passed tier B —
+      the choreography's ordering rule kept
+- [x] rebuild — 16/16 fragment symbols, merged `.config` sha
+      `5af7eca01b287e883fd0ca51fe301b6782105f38b085821e2e2ae03db707aa99` —
+      bit-identical to the first kasan build's config, so the rebuild reproduced it
+- [x] rootfs (3.0 MB), boot 5/5, `PROBE summary passed=0x1ff failed=0x000`
+- [x] **KASAN proved active in the log, not assumed**: `kasan:
+      KernelAddressSanitizer initialized` present; zero `BUG: KASAN`/`use-after-free`
+      lines. The DWARF5 lesson from P3 applies to every profile: a boot without
+      the profile's one job verified is not that profile's boot.
+- [x] packaged 134 MB, then relocated and promoted (P5)
 
 ---
 
-## P5 — Clean-location test: `kcov`, `kasan`, `debug`
+## P5 — Clean-location test: all four bundles
 
-Status: IN PROGRESS — self-containment is now enforced; the relocation half is not done
-Evidence: `artifacts/README.md` (procedure); `artifacts/baseline` (worked example);
-`artifacts/kcov`; `artifacts/debug`; `check/check-all.sh` tier C
+Status: DONE
+Evidence: `check/portable-test.sh`; `research/boot-logs/20261001T184229Z-baseline-PORTABLE.log`
+and the other three `*-PORTABLE.log`; the `clean_location_log` field in each
+`artifacts/*/metadata/manifest.json`
 Checks: B1–B5, C1
 
-`artifacts/baseline` proved the procedure: copy the bundle to `/tmp`, rename
-`build/` away entirely, boot from the bundle alone, require 5/5 plus
-`sha256sum -c`, then re-package as `PORTABLE_ARTIFACT_VERIFIED`. This is what caught
-F-22 (the bundle was secretly repo-dependent because `run.sh` resolved the rootfs only
-from `build/rootfs/`).
+The procedure in `artifacts/README.md` is now a script. For each bundle:
+`sha256sum -c` on the standing bundle, copy to `/tmp/portable-test-<p>/`, rename
+the repository's `build/` away (restored by trap even on failure), boot the copy
+with `--strict-artifact`, require `passed=0x1ff`, append `CLEAN-LOCATION: <p>` to
+the log, then re-verify the original bundle still matches its sums. Promotion then
+goes through `--promote-to PORTABLE_ARTIFACT_VERIFIED --evidence <log>`, which
+refuses without a marked, passing log. **All four bundles are now
+`PORTABLE_ARTIFACT_VERIFIED`.**
 
-**What is now automatic for every bundle.** Tier C boots each artifact with
-`--strict-artifact`, which forbids the `build/` fallback outright, and `run.sh` logs
-the exact paths it resolved. So a bundle that cannot boot without the build tree now
-fails on its own, for all three existing bundles, on every `--all` run. That closes
-the specific failure F-22 was — a bundle quietly borrowing from `build/`.
+Two latent defects surfaced while landing this and are worth their own mention:
 
-**What is still outstanding, stated plainly.** The *relocation* half — copying the
-bundle to `/tmp` and renaming `build/` away so the repo cannot be reached at all —
-has not been run for `kcov` or `debug`. Strict mode is a strong proxy (nothing can
-resolve from `build/`), but it is not the same test: it would not catch a bundle that
-depends on some *other* repo file, nor one whose manifest is inconsistent with its
-contents after a repackage. Until that runs, `kcov` and `debug` stay at
-`TARGET_VERIFIED`. `artifacts/kasan` does not exist yet (P4).
+- **B3 was vacuous.** It searched all of `research/boot-logs/` for the words
+  "clean-location" and found them in that directory's own README — so any bundle
+  could have claimed PORTABLE and passed. Now it requires the manifest's
+  `clean_location_log` field, the log's existence, the PROBE signature, and the
+  per-profile marker. (F-32.)
+- **B1 caught a real half-promoted state.** The first promote run edited three
+  manifests and then died on a scripting error (`write_bundle_readme: command not
+  found`), leaving their SHA256SUMS stale. B1 went red on exactly the changed
+  file. That is the integrity suite working, and it is also the data point for why
+  promotion regenerates sums *last*.
 
-Remaining work:
-
-- [ ] relocate `artifacts/kcov` to `/tmp`, boot 5/5 + `sha256sum -c`, re-package as
-      `PORTABLE_ARTIFACT_VERIFIED`
-- [ ] same for `artifacts/debug` — the interesting case at 460 MB, so the most likely
-      to have picked up an accidental dependency
-- [ ] then `artifacts/kasan`, once P4 produces it
-
-One ordering constraint: re-packaging regenerates the manifest, which **resets the
-validation state**. Do the relocation test first, then re-package once — never
-re-package first and then claim portability.
+The one baseline wrinkle: its original PORTABLE claim (F-22) rested on a README
+sentence, not a named log. With `build/baseline` now pruned, the relocation test
+was re-run against the bundle alone in the most literal sense possible — no tree
+existed to accidentally borrow from.
 
 ---
 
@@ -308,11 +309,11 @@ and any rejected candidate gets recorded with the reason it was rejected.
 
 | Order | Action | Why |
 |---|---|---|
-| 1 | prune `build/baseline` (~875 M) | already packaged and portable-verified; safe to drop |
-| 2 | rebuild `kasan`, boot, package | needs a tree that was pruned |
+| 1 | ~~prune `build/baseline` (~875 M)~~ **done** | was already packaged + portable-verified; the bundle was then re-tested post-prune, proving the tree was redundant |
+| 2 | ~~rebuild `kasan`, boot, package~~ **done** | rebuilt (identical config sha), 134 MB bundle |
 | 3 | keep `build/kcov` (~1.1 G) | P6 needs it |
-| 4 | `build/debug` (~1.2 G) | keep until its bundle passes tiers B/C |
-| 5 | prune `kasan`/`debug` trees only after their bundles pass | never before |
+| 4 | keep `build/debug` (~1.2 G) and `build/kasan` (~0.8 G) | keep until P7's ledger walk cites them; bundles no longer need them |
+| 5 | prune any tree only after its bundle passes tiers B/C *and* promotion | rule kept |
 
 Pruning a tree does not delete a bundle. Bundles are self-contained and gitignored
 along with `kernel/sources/` and `build/`.
@@ -323,17 +324,19 @@ along with `kernel/sources/` and `build/`.
 
 Every one of these, or the work is not done:
 
-- [x] `check/check-all.sh` — all tiers green (**23 passed, 0 failed**, incl. 3 boots)
-- [x] `check/selftest.sh` — every check proven to catch its defect (**19 proven, 0
+- [x] `check/check-all.sh` — all tiers green (**24 passed, 0 failed**, incl. 4 boots)
+- [x] `check/selftest.sh` — every check proven to catch its defect (**23 proven, 0
       not-proven**), tree restored byte-identical
-- [ ] all four profiles built, booted 5/5, packaged — `kasan` has no bundle (P4)
-- [ ] all four bundles relocated-tested and at `PORTABLE_ARTIFACT_VERIFIED`
-      — `baseline` only; `kcov`/`debug` at `TARGET_VERIFIED` (P5)
+- [x] all four profiles built, booted 5/5, packaged
+- [x] all four bundles relocated-tested and at `PORTABLE_ARTIFACT_VERIFIED`
 - [ ] F-2 closed, or explicitly and permanently recorded as open with the
       falsifiable criterion above left in place
 - [ ] `research/state.md` walked to `PORTABLE_ARTIFACT_VERIFIED` with one row per state
 - [x] no document claims a state the evidence does not support — **including this
       file** (A7/A12 enforce the parts that can be enforced mechanically)
 
-Two items above are ticked because they are true *now*, not because the plan says
-so. The four that are not ticked are the work; the tick marks are the point.
+Two of these remain, and both are the non-mechanical work: **F-2** (Kbase coverage
+— write the patch, meet the falsifiable criterion, or record it permanently open)
+and the **formal ladder walk** (one row per state; stop at
+`PORTABLE_ARTIFACT_VERIFIED`; do not enter `SYZKALLER_CONNECTED` or
+`FUZZING_STARTED` while F-2 is open).
