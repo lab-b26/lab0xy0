@@ -198,7 +198,7 @@ else
     #     CONFIG_X=value                 the symbol set
     #     # CONFIG_X is not set          the ONLY kconfig encoding for "off"
     #
-    # F-19: an earlier merge used `grep -v '^#'`, which silently deleted every
+    # F-20: an earlier merge used `grep -v '^#'`, which silently deleted every
     # `is not set` line. A fragment could then not express "must be off" at all,
     # and any Kconfig `choice` fell back to its kconfig `default` — on the kasan
     # profile that turned `# CONFIG_MALI_REAL_HW is not set` into

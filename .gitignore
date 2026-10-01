@@ -64,6 +64,11 @@ Module.symvers
 /AX504X08X-SW-99002-r56p0-18eac0/
 /VX504X08X-SW-99002-r56p0-19eac0/
 
+# Statically linked host binaries built from qemu/target/*.c. The SOURCE is
+# tracked; the compiled probe is a build output (rebuilt by
+# qemu/rootfs/build-rootfs.sh), so it must never be committed.
+/qemu/target/*.stable
+
 # Local editor / scratch
 __pycache__/
 *.pyc

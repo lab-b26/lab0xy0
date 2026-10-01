@@ -856,6 +856,157 @@ in-tree module on 6.12.111 with the recorded patch set. It does **not** prove:
 F-16 and F-17 are what stood between this project and a build; both are now
 resolved *for 6.12.111 specifically*, not for r54p0 in general.
 
+## F-19 — VERIFIED: r54p0 **loads** under QEMU and the EL0 target interface responds
+
+**Status: RESOLVED POSITIVE (boot + load + target interface).** Category:
+`runtime result`. This is the first evidence that the Kbase module is not merely
+compilable but *functional as a userspace-facing device*.
+
+Serial-log evidence, `research/boot-logs/20261001T062348Z-baseline-BOOT.log`
+(four independent boots are committed; all four are identical in substance):
+
+```text
+kernel       6.12.111 bzImage + cpio initramfs, QEMU -machine q35 -no-reboot
+cmdline      console=ttyS0 panic=-1 rdinit=/init loglevel=7
+boot cost    ~2 s guest time (KVM, -m 2048 -smp 4)
+insmod       rc=0
+             mali mali.0: Kernel DDK version r54p0-01eac0
+             mali mali.0: Using Dummy Model
+             mali mali.0: GPU identified as 0x0 arch 14.8.5 r0p0 status 0
+             mali mali.0: Probed as mali0          -> /dev/mali0 created
+EL0 probe    passed=0x1ff  failed=0x000           (all 9 phases PASS)
+```
+
+The probe (`qemu/target/kbase-probe.c`) exercises, in order: `open`,
+`VERSION_CHECK` (negotiated 1.36), `SET_FLAGS`, `GET_GPUPROPS`, `MEM_ALLOC`,
+`mmap`, `MEM_QUERY`, `munmap`. Selected observed values:
+
+```text
+gpuprops     773 bytes; product_id=0x0006 version_status=0xe850 major=9 minor=0
+             gpu_id=0x0000000000000100  num_exec_engines=15
+gpu arch     0x000e0805 == 14.8.5  == tDRx  -> DECISION-2 target confirmed live
+mem_alloc    gpu_va=0x41000 out_flags=0x200f
+```
+
+Consolidated unknown #12 is therefore **answered YES**: `tDRx` does initialise in
+the `MALI_NO_MALI` path on x86_64. This is the first *runtime* confirmation of
+F-4/DECISION-2, which until now rested on source reading only.
+
+### Two undocumented contracts discovered (both would silently break a fuzzer)
+
+**1. `SET_FLAGS` is mandatory between handshake and everything else.**
+`kbase_api_handshake()` deliberately does **not** create a `kctx` when
+`mali_kbase_supports_cap(1.36, MALI_KBASE_CAP_SYSTEM_MONITOR)` is true. Until a
+`KBASE_IOCTL_SET_FLAGS` arrives, every other ioctl fails with `-EPERM`, raised by
+`kbase_file_get_kctx_if_setup_complete()` returning `NULL`
+(`mali_kbase_core_linux.c:1688`). This ordering requirement appears nowhere in the
+uapi headers, and the failure mode is a bare `-EPERM` rather than a diagnostic.
+
+**2. `MEM_ALLOC`'s `out.gpu_va` is a cookie, not a GPU VA.**
+For non-compat 64-bit clients `BASE_MEM_SAME_VA` is forced
+(`mali_kbase_core_linux.c:879`), so `alloc.out.gpu_va` is a cookie keyed on
+`BASE_MEM_COOKIE_BASE` (`64 << 12` = `0x40000`; observed `0x41000`). Consequences:
+
+- `MEM_QUERY` on the cookie returns `-EINVAL` — the cookie is not a region handle;
+- the region must be bound with `mmap(fd, ..., offset=cookie)`, which yields the
+  real GPU VA (== the CPU address for `SAME_VA`);
+- `MEM_FREE` is **rejected** on `SAME_VA` regions; release with `munmap`.
+
+A fuzzer that trusted `out.gpu_va` as a pointer would read/write near address 0.
+
+### Scope of this finding
+
+VERIFIED: the module loads, the device node appears, and the ioctl surface
+responds end-to-end under `MALI_NO_MALI` on x86_64. **NOT** claimed:
+
+- that real hardware behaves this way (per DECISION-1 this environment is
+  **INVESTIGATION-ONLY**; all of the above is `DISCOVERY-ONLY`);
+- that CSF paths are reached — `num_exec_engines=15` is reported, but the probe
+  does not yet open a CSF stream (consolidated unknown #6 still open);
+- any security or conformance conclusion.
+
+Expected, harmless dmesg noise on this host, recorded so it is not later
+mistaken for a defect: `No OPPs found in device tree!`, `Clock not available for
+devfreq`, and `Dummy model register access: ... unsupported register`.
+
+## F-20 — `build.sh` silently deleted every "must be off" line from a fragment
+
+**Status: RESOLVED (fixed and re-verified).** Category: `tooling defect`.
+Found while building the `kasan` profile; it had been latent since the fragment
+merge was written.
+
+Step 4 merged a profile fragment into `.config` with `grep -v '^#'`. That drops
+every `# CONFIG_X is not set` line — which is the **only** kconfig encoding for
+"this symbol must be off". A fragment therefore could not express "off" at all.
+
+The failure is silent in the worst way: a Kconfig `choice` with no member
+selected does not stay unset, it resolves to its kconfig `default`. The `Mali HW
+backend` choice in `drivers/gpu/arm/midgard/Kconfig` has `default MALI_REAL_HW`,
+so the kasan fragment's `# CONFIG_MALI_REAL_HW is not set` became
+`CONFIG_MALI_REAL_HW=y` — the opposite of what the fragment said.
+
+**Reproduced deterministically** (6.12.111, `x86_64_defconfig` + kasan fragment):
+
+```text
+CASE A  fragment appended verbatim      -> MALI_REAL_HW unset, MALI_NO_MALI=y
+                                           (correct, but only by accident:
+                                            deselecting the default member makes
+                                            kconfig fall through to the other)
+CASE B  grep -v '^#'  (the old build.sh) -> CONFIG_MALI_REAL_HW=y
+                                           MALI_NO_MALI unset
+```
+
+Note that CASE A's correctness is itself a trap: it depends on kconfig falling
+through to the non-default member, which is not a documented guarantee and would
+not survive a third member being added to the choice.
+
+The **step 5/8 safety net caught it**, which is the point of those checks — the
+defect was in the merge, not in the verification. Fix: preserve both symbol forms
+(`CONFIG_X=value` and `# CONFIG_X is not set`), drop only prose comments, and
+delete any pre-existing `.config` line for a symbol the fragment mentions so the
+fragment is the single authority and no duplicate can win by position (kconfig
+honours the *first* occurrence, so ordering was previously load-bearing in a way
+nobody had written down).
+
+This is the same class as F-14 (a comment-style mistake kconfig handles
+differently than the author expected) and adjacent to F-15 (a `=n` line mis-read).
+The recurring lesson: **kconfig is not text.** Every fragment merge has now been
+verified against the real symbol semantics.
+
+## F-21 — `kasan.config` named no choice member, so it meant the opposite of what it said
+
+**Status: RESOLVED (fragment corrected).** Category: `config defect`. This is the
+fragment-side half of F-20; recording separately because the two fixes are
+independent and either alone would have left the profile wrong.
+
+`kernel/configs/kasan.config` asserted `# CONFIG_MALI_REAL_HW is not set` *and*
+deferred the choice with a comment:
+
+```text
+# CONFIG_MALI_REAL_HW is not set
+# MALI_NO_MALI choice is DEFERRED for this profile: memory-safety hunting wants
+# the real code paths, not the No-MALI stub. Which reaches the interesting code
+# is UNKNOWN and must be settled by experiment.
+# CONFIG_MALI_NO_MALI=y      <- deferred
+```
+
+That is an un-honourable configuration: it names no member of a mandatory choice.
+Note the last line is also not valid kconfig at all — `# CONFIG_MALI_NO_MALI=y
+<- deferred` has trailing text, so kconfig ignores it silently. Combined with
+F-20 the result was `MALI_REAL_HW=y`.
+
+**The deferred experiment is now answered, by F-19.** `MALI_NO_MALI` is the only
+backend that yields a loadable module and a reachable `/dev/mali0` on this host —
+VERIFIED. Whether `MALI_REAL_HW` would *also* probe under the fake `vexpress`
+platform device is **UNKNOWN / NOT_TESTED**, and is deliberately not claimed in
+either direction; it was not built, so no statement about it is made.
+
+Resolution: kasan now selects `CONFIG_MALI_NO_MALI=y` with
+`CONFIG_MALI_NO_MALI_DEFAULT_GPU="tDRx"` and `MALI_PLATFORM_NAME="vexpress"` —
+identical to baseline/kcov/debug, and consistent with DECISION-2. This is a
+**harness requirement, not a conformance claim**: per DECISION-1 the profile
+remains DISCOVERY-ONLY, while `CONFIG_KASAN*` itself stays allowlisted (§5).
+
 ## Consolidated unknowns
 
 1. ~~Whether r54p0 + all six patches compiles on any x86_64 Linux kernel.~~
@@ -887,17 +1038,27 @@ resolved *for 6.12.111 specifically*, not for r54p0 in general.
     (DECISION-1), so this can only be settled on real hardware.
 11. The complete list of permitted `insmod` module parameters — the supplied text
     is truncated (UNKNOWN; `research/program-scope.md` §8.4).
-12. Whether `tDRx` actually initialises in the `MALI_NO_MALI` path on x86_64
-    (source-supported per F-4, but NOT_TESTED).
-13. ~~Whether the minimal in-tree integration in F-11 is *sufficient*.~~
+12. ~~Whether `tDRx` actually initialises in the `MALI_NO_MALI` path on
+    x86_64.~~ **Answered YES (F-19):** the module loads, `Using Dummy Model`,
+    `GPU identified as 0x0 arch 14.8.5 r0p0`, and the EL0 probe passes all nine
+    phases (`passed=0x1ff failed=0x000`). This is the first *runtime* — not
+    source-level — confirmation of DECISION-2's target choice.
+13. Whether an r54p0 ioctl harness can be driven to completion without
+    undocumented ordering/cookie contracts. **Partly answered (F-19):** it can,
+    but only after discovering two contracts absent from the uapi headers —
+    `SET_FLAGS` is mandatory before any other ioctl (`-EPERM` otherwise), and
+    `MEM_ALLOC.out.gpu_va` is a `SAME_VA` cookie that must be `mmap`ed, not used
+    as a pointer. A *complete* harness (CSF streams, job/command submission) is
+    still unbuilt.
+14. ~~Whether the minimal in-tree integration in F-11 is *sufficient*.~~
     **VERIFIED sufficient for 6.12.111** (F-18): staging, kbuild-ify, and
     `drivers/gpu` wiring all worked as designed, with no further integration
     work needed. It remains unverified for other kernel versions.
-14. ~~Whether the newest LTS kernel pairs cleanly with the compiler on the build
+15. ~~Whether the newest LTS kernel pairs cleanly with the compiler on the build
     host.~~ **Answered, negatively, for 6.18.54** (F-16: the blocker was an
     upstream API removal, not the compiler), and **affirmatively for 6.12.111**
     with gcc 13.3.0 (F-18). No `-Werror` churn was encountered either way.
-15. Which Codespace machine types this account actually offers. F-12 shows the
+16. Which Codespace machine types this account actually offers. F-12 shows the
     consequence of assuming: an unmatchable `hostRequirements` made the codespace
     uncreatable. Machine size must be chosen in the UI and confirmed by
     `codespace-setup.sh` before any build.
