@@ -42,7 +42,12 @@ KBASE_TREE="$REPO_ROOT/work/kbase-patched/driver/product/kernel"
 BUILD_ROOT="$REPO_ROOT/build"
 LOG_DIR="$BUILD_ROOT/logs"
 
-WIRE_TAG="/* Kbase integration added by kernel/scripts/build.sh -- do not edit */"
+# Marker written next to every line this script injects. It MUST be a comment
+# that is valid in BOTH files it lands in: kconfig accepts `#` (and NOT the C
+# comment `/* ... */`, which is a hard kconfig syntax error) and GNU make also
+# accepts `#`. A C comment here makes `make defconfig` fail outright.
+# See analysis/findings.md F-14.
+WIRE_TAG="# Kbase integration added by kernel/scripts/build.sh -- do not edit"
 
 die() { printf '\nerror: %s\n' "$*" >&2; exit 1; }
 
@@ -219,7 +224,24 @@ while IFS= read -r line; do
             want=$(printf '%s' "$line" | cut -d= -f2-)
             checked=$((checked+1))
             got=$(grep -m1 "^${sym}=" "$OUT/.config" | cut -d= -f2- || true)
-            if [ -z "$got" ]; then
+            if [ "$want" = "n" ]; then
+                # kconfig NEVER writes "CONFIG_X=n": an n-valued symbol is
+                # encoded as the line "# CONFIG_X is not set". Looking only for
+                # "^CONFIG_X=" therefore reports a false MISSING for every
+                # fragment line that disables a symbol (e.g. CONFIG_MALI_DEBUG=n).
+                # Both spellings mean n; accept either, and only call it MISSING
+                # when the symbol is absent from the Kconfig altogether.
+                # See analysis/findings.md F-15.
+                if [ -n "$got" ]; then
+                    printf '      [ MISMATCH ] %-44s wanted n, got %s\n' "$sym" "$got"
+                    failed=$((failed+1))
+                elif grep -qx "# ${sym} is not set" "$OUT/.config"; then
+                    printf '      [ ok      ] %-44s = n\n' "$sym"
+                else
+                    printf '      [ MISSING  ] %-44s wanted n — symbol not in the Kconfig\n' "$sym"
+                    failed=$((failed+1))
+                fi
+            elif [ -z "$got" ]; then
                 printf '      [ MISSING  ] %-44s wanted %s — symbol not in the Kconfig\n' "$sym" "$want"
                 failed=$((failed+1))
             elif [ "$got" != "$want" ]; then
@@ -276,6 +298,7 @@ note "8/8  recording build metadata"
     echo "config_sha256=$CONFIG_SHA"
     echo "fragment_sha256=$(sha256sum "$FRAG" | awk '{print $1}')"
     echo "patch_series_sha256=$(cat "$REPO_ROOT/work/kbase-patched/.patch-series.sha256" 2>/dev/null || echo unknown)"
+    echo "research_patch_series_sha256=$(cat "$REPO_ROOT/work/kbase-patched/.research-patch-series.sha256" 2>/dev/null || echo none)"
     echo "payload_fingerprint=$(awk -F= '/^payload=/{print $2}' "$STAGE_MARK" 2>/dev/null || echo unknown)"
     echo "kbuildified=drivers/gpu/arm,drivers/gpu/arm/midgard"
     echo "modules_count=$KO_COUNT"

@@ -1,7 +1,12 @@
 # Findings
 
-Findings recorded during repository organisation and source analysis. Every entry
-is labelled by evidence strength. No finding here has been tested by a build.
+Findings recorded during repository organisation and source analysis, and since
+the first real builds. Every entry is labelled by evidence strength.
+
+**F-1 … F-12 have not been validated by a build.** F-13 … F-15 are defects in
+this repository's own tooling, found by *executing* it on the build host; each
+is fixed and verified. **F-16 is the first result of an actual kernel build**,
+and it is negative: r54p0 does not build on Linux 6.17 or newer.
 
 Severity convention used in this repository: a **build-system defect is not a
 security vulnerability**, and a **virtual-device behaviour is not a
@@ -561,12 +566,298 @@ Consequences, and why this is not a regression:
   again, it must be validated against the account's actual available machine types
   first — an unmatchable requirement blocks the entire build host.
 
+## F-13 — `resolve-kernel-pin.sh` constructed URLs kernel.org does not serve
+
+**Status: FIXED.** Category: `build tooling`. Found on the first real
+execution of the script, on the build host.
+
+The script derived the tarball directory by string surgery on the version:
+
+```bash
+MAJMIN=$(printf '%s' "$VER" | cut -d- -f1 | cut -d. -f1,2)
+URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJMIN}/${TARBALL}"
+```
+
+For `6.18.54` that yields `.../v6.18/linux-6.18.54.tar.xz`. kernel.org returns
+**404**: the current series is not filed per-point-version.
+
+```text
+error: could not fetch https://cdn.kernel.org/pub/linux/kernel/v6.18/sha256sums.asc
+```
+
+Verified layout (2026-10-01, live):
+
+| Release | Actual directory |
+|---|---|
+| 6.18.54 (newest LTS) | `v6.x` |
+| 6.12.111 | `v6.x` |
+| 5.15.221 | `v5.x` |
+| 7.2.8 | `v7.x` |
+| `v6.18/`, `v6.12/`, `v6.6/` | **404 — do not exist** |
+
+So the per-point `v<major>.<minor>` layout the script assumed no longer exists
+at all; the old directories that do exist are `v1.0` … `v5.x`, `v6.x`, `v7.x`.
+
+A second, quieter bug in the same block: the five values parsed out of
+`releases.json` were read with whitespace-separated `read -r`, and the script
+looked for a top-level `isodate` key that does not exist (the date is at
+`released.isodate`). The empty field collapsed, so `source` was silently
+assigned to the `released` variable. The URL was wrong *and* the provenance
+line would have been wrong, without any error.
+
+Fix: use the `source` URL kernel.org publishes in `releases.json` (it is
+authoritative and already correct), then fall back to `v<major>.<minor>` and
+`v<major>.x`; a candidate directory is accepted **only if its `sha256sums.asc`
+actually lists the tarball**, so a layout change fails loudly here instead of
+writing a wrong pin. Fields are now `|`-delimited so an empty value cannot
+shift its neighbours. See `kernel/scripts/resolve-kernel-pin.sh`.
+
+## F-14 — `build.sh` injected a C comment into a Kconfig file
+
+**Status: FIXED.** Category: `build tooling`. Found on the first real build.
+
+The wiring marker was written in C comment syntax:
+
+```bash
+WIRE_TAG="/* Kbase integration added by kernel/scripts/build.sh -- do not edit */"
+```
+
+and appended to **both** `drivers/gpu/Makefile` and `drivers/gpu/Kconfig`.
+`/* */` is a valid Makefile comment but is a hard syntax error in Kconfig, so
+the very first `make defconfig` died:
+
+```text
+drivers/gpu/Kconfig:15: syntax error
+drivers/gpu/Kconfig:15: unknown statement "Kbase"
+make[3]: *** [.../scripts/kconfig/Makefile:95: defconfig] Error 1
+```
+
+Fix: `#` is a comment in both languages, so the tag is now `#`-prefixed. The
+already-staged tree was repaired in place; both files verified. See
+`kernel/scripts/build.sh`.
+
+This is exactly the class of defect F-10 predicted: `build.sh` was
+syntax-checked, never executed against a real kernel, and the failure surfaced
+on the first real run.
+
+## F-15 — `build.sh` step 5 mis-read every `=n` line in a fragment
+
+**Status: FIXED.** Category: `build tooling`. Found on the first real build.
+
+Step 5 is the safety net that refuses to compile a kernel missing Kbase. It
+looked a symbol up with `grep "^${sym}=" .config` only. But kconfig **never**
+writes `CONFIG_X=n`: an `n`-valued symbol is written as the line
+`# CONFIG_X is not set`. So every fragment line that *disables* a symbol was
+reported as missing, including the mandatory `CONFIG_MALI_DEBUG=n` (§8.3):
+
+```text
+[ MISSING  ] CONFIG_MALI_DEBUG   wanted n — symbol not in the Kconfig
+```
+
+The symbol was present and correctly `n` (`midgard/Kconfig:194`, `default n`).
+The safety net was not merely wrong, it was **wrong in the fail-closed
+direction**: it would have blocked a conforming build, and the obvious
+"fix" — deleting the line from the fragment — would have dropped a mandatory
+option. Fix: when the wanted value is `n`, accept either spelling, and report
+MISSING only when the symbol is absent from the Kconfig entirely.
+
+## F-16 — r54p0 does not build on Linux 6.17+ (`__SetPageMovable` removed)
+
+**Status: OPEN, build-blocking.** Category: `r54p0 vs kernel API`. The first
+**real** build result in this project, and the first evidence for consolidated
+unknown #1 and #2.
+
+Attempt: `baseline` profile, Linux **6.18.54** (newest LTS, chosen by
+`resolve-kernel-pin.sh` per Arm's "latest stable/longterm" guidance), all six
+vendor patches applied, `gcc 13.3.0`, x86_64.
+
+Result — **FAILED** after ~2 900 objects:
+
+```text
+drivers/gpu/arm/midgard/mali_kbase_mem_migrate.c:83:9: error:
+    implicit declaration of function '__SetPageMovable'
+drivers/gpu/arm/midgard/mali_kbase_mem_migrate.c:158:25: error:
+    implicit declaration of function '__ClearPageMovable'
+cc1: all warnings being treated as errors
+```
+
+Full log: `research/build-logs/6.18.54-baseline-FAILED.log`
+(errors extracted: `…-FAILED.errors.txt`).
+
+Cause — **VERIFIED**: r54p0 calls `__SetPageMovable`/`__ClearPageMovable`
+**unguarded**, with no `KERNEL_VERSION` gate, and the declarations vanished
+from `include/linux/migrate.h`:
+
+| Tag | `__SetPageMovable` declared? |
+|---|---|
+| v6.12, v6.13, v6.14, v6.15, v6.16 | **yes** |
+| v6.17, v6.18, v7.0, v7.1, v7.2 | **no** |
+
+(checked against `raw.githubusercontent.com/torvalds/linux/<tag>/include/linux/migrate.h`)
+
+Consequences, stated precisely:
+
+- This is **not** a configuration problem. All 13 fragment symbols verified
+  (step 5/8 passed with 0 problems), and no Kbase warning preceded the error.
+  No amount of Kconfig work fixes it.
+- It **is** not a patch-application problem either: all 6/6 vendor patches
+  applied cleanly.
+- It is an upstream API removal, so **r54p0 cannot build on 6.17 or newer
+  without a research patch** in `kernel/patches/`. That patch is not written.
+- It refines, and partially answers, consolidated unknowns #1/#2: r54p0 does
+  *not* compile on every kernel in its 3.17→6.13 gate range, nor on the newest
+  LTS. The gate range is about `KERNEL_VERSION` branches; it says nothing
+  about unguarded API calls, which is precisely the forbidden inference
+  `research/methodology.md` warns about (a version gate → a support claim).
+
+Action taken — **6.12.111** is now pinned: the newest `longterm` release that
+still exports these symbols (verified present in the v6.12 and v6.12.111
+tags). This is a deliberate, recorded step down from the newest LTS, forced by
+evidence rather than convenience, and `kernel/sources/kernel.pin` records both
+candidates and the reason. 6.12 also sits below r54p0's highest observed gate
+(6.13.0), so it is the conservative choice as well as the evidenced one.
+
+Two further `__SetPageMovable` call sites exist at lines 241 and 330 of the
+same file, inside the same unguarded region, so expect the fix — whatever form
+it takes — to be needed in more than one place. INFERRED, not yet observed.
+
+What this finding is **not**: not a vulnerability, not a Kbase defect, and not
+a statement that 6.17+ is a bad kernel. It is a source/API mismatch that this
+project hit by building.
+
+## F-17 — r54p0 calls `__clk_is_enabled`, which x86_64 defconfig never builds
+
+**Status: OPEN, build-blocking (link stage).** Category: `r54p0 vs kernel config`.
+Found on the 6.12.111 build, after the F-16 obstacle was removed.
+
+Attempt: `baseline` profile, Linux **6.12.111** (newest LTS at or below the
+verified 6.16 API boundary), all six vendor patches, gcc 13.3.0, x86_64.
+
+Result: **compilation of Kbase succeeded in full** (128 Kbase objects, all 149
+sources reached, 0 compile errors) and the build then failed in **modpost**:
+
+```text
+ERROR: modpost: "__clk_is_enabled" [drivers/gpu/arm/midgard/mali_kbase.ko] undefined!
+make[3]: *** [.../scripts/Makefile.modpost:145: Module.symvers] Error 1
+```
+
+Cause — **VERIFIED**, and it is a *configuration* problem, unlike F-16:
+
+- `__clk_is_enabled` **is** `EXPORT_SYMBOL_GPL`'d in 6.12.111
+  (`drivers/clk/clk.c:630`), so the API exists and is exported.
+- But the whole clock core is built only when `CONFIG_COMMON_CLK` is set
+  (`drivers/clk/Makefile:4` — `obj-$(CONFIG_COMMON_CLK) += clk.o`), and
+  `# CONFIG_COMMON_CLK is not set` in the merged `.config`.
+- `x86_64_defconfig` does not enable it: it is an ARM/SoC-centric option with no
+  x86 consumer, so an in-tree x86 build simply never emits the symbol.
+- r54p0 calls it **unguarded** at `mali_kbase_core_linux.c:3292` and `:3329`,
+  and `#include <linux/clk-provider.h>` is unconditional at line 95 — the
+  *declaration* is visible (it is not `#ifdef`-guarded in the header), which is
+  exactly why this compiles cleanly and only fails at link time.
+
+So this is the mirror image of F-16: there the symbol was **removed upstream**;
+here the symbol is **present but never built** for this architecture. A third
+call site exists in the devicetree and meson platform backends
+(`platform/devicetree/mali_kbase_runtime_pm.c`,
+`platform/meson/mali_kbase_runtime_pm.c`), though those are not compiled in this
+`MALI_NO_MALI` configuration.
+
+Two candidate fixes existed:
+
+1. **Enable `CONFIG_COMMON_CLK`** in the profile fragment. One line, no source
+   change — but it is a kernel config delta **outside** the §5 allowlist
+   (`../research/program-scope.md` §5), which would make `baseline`
+   non-conforming as the intended control profile.
+2. **Guard the call sites** in a research patch (`kernel/patches/`), behind
+   `IS_ENABLED(CONFIG_COMMON_CLK)`.
+
+**Decision: option 2, chosen and written** as
+`kernel/patches/0001-kbase-guard-clk-is-enabled-behind-COMMON_CLK.patch`. The
+deciding reason is scope, not convenience: it keeps the configuration at plain
+`x86_64_defconfig` and therefore introduces **no configuration delta at all**,
+so §5 compliance is preserved by construction rather than by argument.
+
+The patch is a **build fix, not a behaviour change**, and that claim is
+checkable in both directions:
+
+- `CONFIG_COMMON_CLK=y` → the `__clk_is_enabled` test is still performed, so the
+  real-hardware behaviour is untouched.
+- `CONFIG_COMMON_CLK=n` → `clk_disable_unprepare()` is a no-op stub
+  (`include/linux/clk.h:1155`, and `clk_disable`/`clk_put` likewise at
+  `:1075`/`:1056`), and `kbdev->clocks[]` can never be populated because
+  `clk_get()` is a stub returning NULL, so the loop body is unreachable.
+
+It is now applied automatically by `apply-patches.sh` after the six vendor
+patches, and carries its own series hash so a build using it can never be
+attributed to pristine vendor source. This is the first entry in this
+directory; see `../kernel/patches/README.md`.
+
+An important secondary observation: this class of failure — a symbol that
+*compiles* but does not *link* — cannot be caught by `build.sh` step 5/8, which
+only inspects `.config`. It is a genuinely new failure category, and the
+repository's "a version gate is not a support claim" rule (F-16) applies here
+too: r54p0 compiling cleanly proves nothing about the module linking.
+
+## F-18 — VERIFIED: r54p0 **builds and links** as a module on Linux 6.12.111
+
+**Status: RESOLVED POSITIVE (compile+link only).** Category: `build result`.
+This is the first **successful** Kbase build in this project, and the first
+positive evidence for consolidated unknowns #1 and #2.
+
+```text
+profile      baseline
+kernel       6.12.111 (x86_64_defconfig + kernel/configs/baseline.config)
+kbase        r54p0-01eac0 + 6 vendor patches + 1 research patch (F-17)
+compiler     gcc 13.3.0, Ubuntu 24.04
+result       SUCCESS — 3 063 objects, 0 errors, 0 undefined symbols
+modules      10 .ko, including drivers/gpu/arm/midgard/mali_kbase.ko (2.4 MB)
+             3 627 external+local symbols in the Kbase module
+kernel image arch/x86/boot/bzImage (13.6 MB)
+config       sha256 515ce13d9fcdfb4d4d4dbbe8885f38b8850dd8deedbde018d5c2eecbcdb823e9
+metadata     build/baseline/build-metadata.txt
+```
+
+Independently checked, beyond "make exited 0":
+
+- `modinfo` reports `version: r54p0-01eac0 (UK version 1.36)`, `license: GPL`,
+  `intree: Y`, `vermagic: 6.12.111` — the module is the expected one and
+  matches the running kernel.
+- The `MALI_PLATFORM_NAME="vexpress"` backend is genuinely compiled in
+  (`mali_kbase_config_vexpress.c` present in the module), so
+  `CONFIG_MALI_PLATFORM_NAME` really reached the build rather than being
+  accepted and ignored.
+- `MALI_NO_MALI_DEFAULT_GPU="tDRx"` is baked in (the literal `tDRx` is
+  present), confirming F-4/DECISION-2 reached the binary.
+- `CONFIG_MALI_DEBUG=n` is honoured: no `kbase_dbg_*` symbol is emitted.
+
+**What this does and does not prove.** It proves r54p0 compiles and links as an
+in-tree module on 6.12.111 with the recorded patch set. It does **not** prove:
+
+- that the module **loads** (state `KBASE_LOAD_VERIFIED` is a separate state,
+  and `insmod` is where most real defects appear);
+- that the `NO_MALI` harness initialises a GPU, or that `tDRx` does anything
+  (consolidated unknown #12 — still `NOT_TESTED`);
+- that 6.16 works. F-17 was fixed for the newest-LTS-below-6.17 kernel; whether
+  the **top** of the supported range (6.13–6.16) also builds is untested, and
+  the upper end is the more interesting one for real-hardware relevance;
+- anything about behaviour, security, or conformance. Per DECISION-1 this
+  x86 environment is **INVESTIGATION-ONLY** regardless of the build outcome.
+
+F-16 and F-17 are what stood between this project and a build; both are now
+resolved *for 6.12.111 specifically*, not for r54p0 in general.
+
 ## Consolidated unknowns
 
-1. Whether r54p0 + all six patches compiles on any x86_64 Linux kernel.
-2. Which exact kernel version to select. ARM GUIDANCE narrows the choice
-   (latest ACK or latest Linux stable/LTS — see `research/program-scope.md` §4),
-   but the specific version is still a build-phase verification item.
+1. ~~Whether r54p0 + all six patches compiles on any x86_64 Linux kernel.~~
+   **VERIFIED YES for 6.12.111** (F-18), and **VERIFIED NO for 6.17+** (F-16).
+   So the answer is version-dependent, and the supported range is now
+   bracketed: it builds on 6.12.111, it does not build on 6.17+, and the exact
+   upper bound (6.13–6.16) is still open.
+2. ~~Which exact kernel version to select.~~ **Answered: 6.12.111** — the newest
+   LTS at or below the verified 6.16 API boundary (F-16), now confirmed to
+   build (F-18). Re-open if a research patch lifts the 6.17 ceiling; the
+   6.13–6.16 range is the next thing worth testing, since it is the part of
+   the range r54p0's own gates were written for.
 3. The exact minimal upstream kernel configuration.
 4. ~~Why `NO_MALI_DEFAULT_GPU` differs between Arm's guide (`tKRx`) and the source
    default (`tMIx`).~~ **Resolved by F-4 / DECISION-2**: neither is the latest;
@@ -588,15 +879,14 @@ Consequences, and why this is not a regression:
     is truncated (UNKNOWN; `research/program-scope.md` §8.4).
 12. Whether `tDRx` actually initialises in the `MALI_NO_MALI` path on x86_64
     (source-supported per F-4, but NOT_TESTED).
-13. Whether the minimal in-tree integration in F-11 is *sufficient*. It is derived
-    from the vendor's own `Kbuild`/`Makefile`/`Kconfig` files by inspection, but no
-    build has confirmed it. Expect the first real build to surface further
-    integration work — `build.sh` step 5/8 is designed to fail loudly and
-    specifically rather than produce a kernel without Kbase.
-14. Whether the newest LTS kernel pairs cleanly with the compiler on the build
-    host (gcc 15.x against a recent kernel is a plausible `-Werror` / API-churn
-    risk; per BUILD-PLAN.md, record the first error rather than silently
-    downgrading).
+13. ~~Whether the minimal in-tree integration in F-11 is *sufficient*.~~
+    **VERIFIED sufficient for 6.12.111** (F-18): staging, kbuild-ify, and
+    `drivers/gpu` wiring all worked as designed, with no further integration
+    work needed. It remains unverified for other kernel versions.
+14. ~~Whether the newest LTS kernel pairs cleanly with the compiler on the build
+    host.~~ **Answered, negatively, for 6.18.54** (F-16: the blocker was an
+    upstream API removal, not the compiler), and **affirmatively for 6.12.111**
+    with gcc 13.3.0 (F-18). No `-Werror` churn was encountered either way.
 15. Which Codespace machine types this account actually offers. F-12 shows the
     consequence of assuming: an unmatchable `hostRequirements` made the codespace
     uncreatable. Machine size must be chosen in the UI and confirmed by

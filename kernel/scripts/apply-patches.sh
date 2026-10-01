@@ -73,15 +73,49 @@ for p in "$PATCH_DIR"/0*.patch; do
        or patch set changed — stop and investigate (see analysis/findings.md)."
     fi
 done
-echo "applied $applied/6 patches."
+echo "applied $applied/6 vendor patches."
+
+# --- 3b. research-authored patches (ours, from kernel/patches/) -----------
+# Kept strictly separate from the vendor series: Arm's six are third-party
+# and byte-preserved under patches/virtual-device/, while these are authored
+# here. They are applied AFTER the vendor series (they are written against
+# vendor-patched source) and are identified by their own hash.
+echo
+echo "applying research patches in order (from $DRIVER, patch -p1):"
+research_applied=0
+shopt -s nullglob
+for p in "$REPO_ROOT/kernel/patches"/0*.patch; do
+    rname=$(basename "$p")
+    printf '  %-64s ' "$rname"
+    if ( cd "$DRIVER" && patch -p1 --forward --silent < "$p" ); then
+        echo "applied"
+        research_applied=$((research_applied+1))
+    else
+        echo "FAILED"
+        die "research patch $rname did not apply. It was authored against
+       r54p0 + the six vendor patches; if either changed, regenerate it
+       against the current tree. See analysis/findings.md."
+    fi
+done
+shopt -u nullglob
+[ "$research_applied" -eq 0 ] && echo "  (none present)"
 
 # --- 4. patch-series identity for the build manifest ---------------------
+# The vendor series hash stays EXACTLY as before (it is the identity of the
+# six Arm patches alone). The research series gets its own hash, and the
+# manifest carries both, so an artifact can never be attributed to the wrong
+# patch set.
 echo
 SERIES_FILE="$PATCH_DIR/SHA256SUMS"
 [ -f "$SERIES_FILE" ] || die "patches/virtual-device/SHA256SUMS missing"
 SERIES_HASH=$(sha256sum "$SERIES_FILE" | awk '{print $1}')
-echo "patch-series identity (sha256 of ordered checksums): $SERIES_HASH"
+echo "vendor patch-series identity (sha256 of ordered checksums): $SERIES_HASH"
 echo "$SERIES_HASH" > "$PATCHED/.patch-series.sha256"
+
+RESEARCH_HASH=$(cat "$REPO_ROOT"/kernel/patches/0*.patch 2>/dev/null | sha256sum | awk '{print $1}')
+[ -n "$RESEARCH_HASH" ] || RESEARCH_HASH="none"
+echo "research patch-series identity (sha256 over $research_applied patch(es)): $RESEARCH_HASH"
+echo "$RESEARCH_HASH" > "$PATCHED/.research-patch-series.sha256"
 
 # --- 5. confirm the known guards are present -----------------------------
 echo

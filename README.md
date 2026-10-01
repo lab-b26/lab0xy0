@@ -48,27 +48,40 @@ does, the artifact model in `artifacts/` has been bypassed.
 
 ## Current phase
 
-This repository is in the **organisation + source-analysis + scope-evidence**
-phase. **Nothing has been built, booted, loaded, or fuzzed.** No kernel version is
-chosen, no `.config` is generated, and no artifact exists. Current state:
-`NOT_STARTED` (`research/state.md`).
+This repository has moved past the **organisation + source-analysis** phase.
+The `baseline` profile **compiles and links successfully** against
+**Linux 6.12.111**: r54p0 + the six Arm patches + one research patch produce
+`mali_kbase.ko` and a `bzImage`. **Nothing has been booted, loaded, or
+fuzzed**, and no artifact exists. Current state is still `NOT_STARTED`
+(`research/state.md`) — deliberately, because a compile is not a loaded driver
+and the state checklist has not been signed off.
 
-**The build is deliberately deferred to a separate build host.** This repository was
-organised on a machine with ~3.8 GB free disk, ~1.6 GB available RAM, and no `bison`,
-which is not a viable kernel build environment. What lives here instead is the
-reproducible *machinery* to run the build elsewhere — a pinned fetcher, a
-patch-preparation script, a shared `build.sh` with config verification, a build-host
-preflight, and a Codespaces setup script. GitHub Codespaces can serve as that host;
-see `kernel/BUILD-HOST.md` and `kernel/BUILD-PLAN.md`. There is deliberately no
-`.devcontainer/`, so create the codespace from the default image and pick
-**4 cores / 16 GB / 64 GB** yourself.
+Getting there took three builds and three real blockers, all recorded:
+
+| Attempt | Result | Cause |
+|---|---|---|
+| 6.18.54 (newest LTS) | FAILED to compile | `__SetPageMovable` removed upstream in v6.17; r54p0 calls it unguarded (**F-16**) |
+| 6.12.111 | Kbase compiled, FAILED to link | `__clk_is_enabled` is only built under `CONFIG_COMMON_CLK`, which `x86_64_defconfig` leaves off (**F-17**) |
+| 6.12.111 + research patch | **SUCCESS** | — (**F-18**) |
+
+Two of the three blockers were defects in this repository's **own tooling**,
+found only by executing it against a real kernel: `resolve-kernel-pin.sh` built
+404 URLs from the kernel.org layout (**F-13**), and `build.sh` wrote a C comment
+into a Kconfig file and then mis-read every `=n` config line (**F-14**, **F-15**).
+Syntax-checking the scripts had passed on all of them.
+
+The build ran on a GitHub Codespace used as the build host. There is deliberately
+no `.devcontainer/` (F-12): create the codespace from the default image and pick
+the machine size yourself. **4 cores / 16 GB** is the working configuration;
+32 GB of disk is enough for one profile at a time, which is how it was run.
+See `kernel/BUILD-HOST.md` and `kernel/BUILD-PLAN.md`.
 
 Quick start on the build host:
 
 ```bash
 ./kernel/scripts/codespace-setup.sh --yes  # machine spec, deps, git identity,
                                            # GitHub access, gh; then preflight.sh
-./kernel/scripts/resolve-kernel-pin.sh     # pick latest LTS from kernel.org, pin it
+./kernel/scripts/resolve-kernel-pin.sh     # newest LTS from kernel.org, pin it
 #   commit the pin, so the kernel choice is reproducible
 ./kernel/scripts/fetch-kernel.sh
 ./kernel/scripts/apply-patches.sh
@@ -77,22 +90,26 @@ Quick start on the build host:
 
 `build.sh` refuses to compile unless every `CONFIG_*` in the profile fragment
 actually took effect in the merged `.config` — a kernel that quietly lacks Kbase is
-worse than no kernel. Nothing here has been compiled yet: `research/state.md` is
-`NOT_STARTED`.
+worse than no kernel. That check is what proves the config is honest; it cannot
+see link-time failures, which is a separate class (F-17).
 
 What *is* established (see `analysis/` and `research/`):
 
+- **r54p0 builds and links as a module on Linux 6.12.111** (F-18) — the first
+  real build in this project. Compile and link only; not loaded, not booted.
+- r54p0 **cannot** build on Linux 6.17 or newer, for a specific verified API
+  reason (F-16). The usable ceiling is therefore below the newest LTS, and
+  6.12.111 is the newest LTS that works.
 - r54p0-01eac0 inventoried and verified (441 files, GPL-2.0); the six supplied
   virtual-device patches VERIFIED to apply to it (matrix in
   `analysis/virtual-device.md`).
 - Arm program scope, configuration allowlist, and discovery-vs-validation rule
   captured in `research/program-scope.md`.
 - Kernel-compatibility analysis and Arm's "latest stable/LTS" guidance recorded
-  (`analysis/kernel-compatibility.md`); the exact kernel remains a build-phase
-  decision.
-- A verified build-system finding (r54p0 arbitration dangling reference) and two
-  scope findings (F-8 harness surface, F-9 discovery-only configs) in
-  `analysis/findings.md`.
+  (`analysis/kernel-compatibility.md`); the version is now **decided by build
+  evidence** — the newest LTS does not work, and 6.12.111 does.
+- Findings F-1 … F-18 in `analysis/findings.md`, including the three
+  build-blocking issues and the first positive build result.
 
 ## Layout
 

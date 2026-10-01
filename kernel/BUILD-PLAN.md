@@ -1,40 +1,100 @@
-# Phase 2 build plan — DEFERRED, NOT YET RUN
+# Phase 2 build plan — steps 1–5 EXECUTED, 6+ not started
 
 ```text
-STATUS:  PLANNED — nothing in this document has been executed.
-STATE:   NOT_STARTED   (research/state.md)
+STATUS:  PARTIALLY EXECUTED (2026-10-01)
+STATE:   NOT_STARTED   (research/state.md) — see "Why the state did not move"
 ```
 
-No kernel has been selected, downloaded, compiled, booted, or packaged. This file
-records **how** the build will be performed on the build host, so the next session
-starts from a clean, reproducible position rather than improvising.
+Steps 1–5 below have now been run on a real build host (a 4-core / 16 GB / 32 GB
+Codespace). The outcome is not the happy path this plan anticipated:
 
-**The machine that organised this repository is not the build host.** Its disk
-(3.8 GB free), available RAM (1.6 GB), and missing `bison` make it unsuitable.
-See `BUILD-HOST.md`.
+- the newest LTS (6.18.54) **does not build** — r54p0 calls `__SetPageMovable`,
+  removed upstream in v6.17 (**F-16**);
+- the next candidate (6.12.111) compiled all of Kbase but **failed to link** on
+  `__clk_is_enabled` (**F-17**), fixed by a research patch;
+- with that patch, **6.12.111 builds and links successfully** (**F-18**).
+
+Three attempts, three distinct blockers, all recorded. Steps 6+ (boot, validate,
+package, instrumented profiles) have **not** run.
+
+### Why the state did not move
+
+`BASELINE_BUILT` requires "baseline kernel built and its log kept". A kernel
+*was* built and the log was kept, but the state is deliberately left at
+`NOT_STARTED` because:
+
+1. `research/state.md` §36 requires a formal verification checklist per state,
+   and that checklist has not been run and signed off.
+2. A compile is not a build in the sense the project uses: nothing has been
+   **loaded** or **booted**, so no claim beyond "it compiles and links" is
+   supported. Claiming `BASELINE_BUILT` from a `make` exit code is exactly the
+   kind of inference `research/methodology.md` forbids.
+
+So the correct reading of the current position is: **the first hard blocker
+ahead of this project has been cleared**, and the state ledger stays honest.
+
+## What the executed steps actually cost
+
+Measured on the build host, for planning the remaining profiles:
+
+| Item | Measured |
+|---|---|
+| Linux tarball (`.tar.xz`) | 141 MB |
+| Extracted source | ~1.7 GB |
+| One `O=` build output | ~1.5 GB (after the build) |
+| Kernel compile, 4 jobs | ~15 min |
+| Peak disk during one profile | ~4.5 GB |
+
+The 32 GB Codespace disk therefore fits **one profile at a time** with room to
+spare, which matches the prune-and-rebuild strategy in `BUILD-HOST.md`. It is
+*below* the 25 GB comfortable threshold, so `preflight.sh` warns (not fails)
+and `codespace-setup.sh --check` reports it as a problem. Building `kasan`
+next is feasible; building all four without pruning is not.
 
 ## Order of operations (do not reorder)
 
 ```text
 0. clone this repo on the build host
-1. kernel/scripts/preflight.sh          # verify the host; exits 1 if not ready
-2. fill kernel/sources/kernel.pin       # pin an exact version + checksum
-3. kernel/scripts/fetch-kernel.sh       # download + verify + extract
-4. kernel/scripts/apply-patches.sh      # pristine r54p0 + six patches
-5. kernel/scripts/build.sh --profile baseline     # FIRST, always
-6.   ... boot + validate + package baseline ...
-7. kernel/scripts/build.sh --profile kasan
-8. kernel/scripts/build.sh --profile kcov
-9. kernel/scripts/build.sh --profile debug
-10. rootfs + QEMU + artifact packaging + clean-location test
+1. kernel/scripts/codespace-setup.sh    # DONE — machine spec, deps, identity, gh
+2. kernel/scripts/preflight.sh          # DONE — READY
+3. fill kernel/sources/kernel.pin       # DONE — 6.12.111 (+ why not 6.18.54)
+4. kernel/scripts/fetch-kernel.sh       # DONE — checksum verified
+5. kernel/scripts/apply-patches.sh      # DONE — 6/6 vendor + 1 research patch
+6. kernel/scripts/build.sh --profile baseline     # DONE — compiles and links
+7.   ... boot + validate + package baseline ...   # NOT STARTED  <-- next
+8. kernel/scripts/build.sh --profile kasan
+9. kernel/scripts/build.sh --profile kcov
+10. kernel/scripts/build.sh --profile debug
+11. rootfs + QEMU + artifact packaging + clean-location test
 ```
 
 **Baseline first, alone.** It answers the one question everything else depends on:
 does r54p0 + the six patches + the chosen kernel compile at all? Do not build four
-profiles in parallel on a 4-vCPU / 8 GB host, and do not start the instrumented
-variants until baseline works.
+profiles in parallel on a 4-vCPU host, and do not start the instrumented variants
+until baseline works. That question is now answered: **yes, on 6.12.111** (F-18),
+after three failed attempts (F-14, F-16, F-17).
 
-## Step 2 — choosing the kernel version (still unresolved)
+Step 7 is the next real work, and it is a different kind of step: everything so
+far has been *compilation*, and no statement about the driver actually running
+has been made. `qemu/` and `qemu/rootfs/` are documentation placeholders, so
+step 7 needs a rootfs built first, then a QEMU boot, then `insmod` — and only
+after that does `KBASE_LOAD_VERIFIED` become reachable.
+
+## Step 2 — choosing the kernel version — RESOLVED, with a caveat
+
+**Resolved on 2026-10-01: Linux 6.12.111** (`sources/kernel.pin`). The rule
+below selected 6.18.54, the newest LTS, and that turned out not to build (F-16),
+so the pin was moved to the newest LTS that r54p0 can actually build. The pin
+file records both candidates and the reason, so the deviation is auditable
+rather than silent.
+
+The practical consequence for the remaining profiles: **the newest LTS is not
+available**, so "newest suitable LTS" is now constrained by r54p0's real
+compatibility rather than by policy. A 6.13–6.16 build is the obvious next
+experiment — that is the range r54p0's own highest `KERNEL_VERSION` gate
+(6.13.0) was written for, and it is the most relevant to real hardware.
+
+### The original rule (kept, because it is still the rule)
 
 Arm guidance (VERIFIED, `../research/program-scope.md` §4): for a new virtual test
 environment, use the **latest Android Common Kernel or the latest Linux Kernel

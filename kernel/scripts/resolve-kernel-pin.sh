@@ -77,7 +77,7 @@ curl -fsSL --retry 3 --retry-delay 2 "$RELEASES_JSON" -o "$tmp" \
 # --- pick the newest longterm release -------------------------------------
 # No jq dependency on the build host; python3 is already required for the kernel
 # build anyway.
-read -r VER MONIKER ISO RELEASED <<<"$(python3 - "$tmp" <<'PY'
+IFS='|' read -r VER MONIKER ISO ISEOL SOURCE <<<"$(python3 - "$tmp" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 rel = d.get("releases") or []
@@ -88,24 +88,42 @@ lt = [r for r in rel if (r.get("moniker") or "") == "longterm"]
 if not lt:
     sys.exit("no release carries the 'longterm' moniker")
 best = max(lt, key=key)
-print(best.get("version",""), best.get("moniker",""),
-      best.get("isodate",""), best.get("released",{}).get("isodate",""))
+# "|"-delimited: a whitespace-separated `read` collapses empty fields and would
+# silently shift these values into the wrong variables (the date lives at
+# released.isodate; there is no top-level "isodate" key in this document).
+print("|".join([best.get("version", ""), best.get("moniker", ""),
+               best.get("released", {}).get("isodate", ""),
+               "EOL" if best.get("iseol") else "", best.get("source", "")]))
 PY
 )" || die "failed to select a longterm release from releases.json"
 
 [ -n "$VER" ] || die "releases.json produced an empty version"
 
-MAJMIN=$(printf '%s' "$VER" | cut -d- -f1 | cut -d. -f1,2)
 TARBALL="linux-${VER}.tar.xz"
-URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJMIN}/${TARBALL}"
-SUMFILE="https://cdn.kernel.org/pub/linux/kernel/v${MAJMIN}/sha256sums.asc"
+
+# --- locate the tarball: which kernel.org directory actually holds it -------
+# Do NOT derive the directory by string surgery on the version. kernel.org files
+# the CURRENT series under v<major>.x (6.18.x and 6.12.x both live in v6.x,
+# 5.15.x in v5.x) and only frozen series get their own vX.Y directory, so
+# "v6.18/sha256sums.asc" 404s. releases.json already names the real location
+# in `source`; try that first, then the conventional layouts as a fallback.
+#
+# A candidate is accepted only if its sha256sums.asc actually LISTS the
+# tarball, so a stale layout fails loudly here instead of writing a bad pin.
+# See analysis/findings.md F-13.
+MAJ=$(printf '%s' "$VER" | cut -d- -f1 | cut -d. -f1)
+MIN=$(printf '%s' "$VER" | cut -d- -f1 | cut -d. -f2)
+BASE="https://cdn.kernel.org/pub/linux/kernel"
+
+CANDIDATES=()
+[ -n "${SOURCE:-}" ] && CANDIDATES+=("$(dirname "$SOURCE")")
+CANDIDATES+=("$BASE/v${MAJ}.${MIN}" "$BASE/v${MAJ}.x")
 
 echo
 echo "selected release"
 echo "  version   : $VER"
 echo "  moniker   : $MONIKER"
-echo "  isodate   : $ISO"
-echo "  released  : $RELEASED"
+echo "  released  : $ISO ${ISEOL:+(marked EOL)}"
 echo "  tarball   : $TARBALL"
 echo
 echo "reasoning: newest release carrying the 'longterm' moniker. That set is"
@@ -113,12 +131,35 @@ echo "exactly the Longterm (LTS) series, which is what Arm's guidance asks for."
 echo
 
 # --- fetch the authoritative checksum -------------------------------------
-echo "fetching $SUMFILE"
-curl -fsSL --retry 3 --retry-delay 2 "$SUMFILE" -o "$tmp.sums" \
-    || die "could not fetch $SUMFILE"
-SHA=$(awk -v f="$TARBALL" '$2 == f {print $1}' "$tmp.sums" | head -1)
-[ -n "$SHA" ] || die "$TARBALL not listed in $SUMFILE"
+SUMFILE=""; SHA=""
+for dir in "${CANDIDATES[@]}"; do
+    sum="$dir/sha256sums.asc"
+    printf 'looking for %s in %s ...\n' "$TARBALL" "$dir"
+    if curl -fsSL --retry 2 --retry-delay 2 "$sum" -o "$tmp.sums" 2>/dev/null; then
+        sha=$(awk -v f="$TARBALL" '$2 == f {print $1}' "$tmp.sums" | head -1)
+        if [ -n "$sha" ]; then
+            SUMFILE="$sum"; SHA="$sha"; break
+        fi
+        echo "  not listed there"
+    else
+        echo "  no sha256sums.asc ($(curl -s -o /dev/null -w '%{http_code}' "$sum"))"
+    fi
+done
+
+[ -n "$SUMFILE" ] || die "$TARBALL not found in any candidate directory:
+       ${CANDIDATES[*]}
+       The kernel.org layout may have changed again. Check
+       https://cdn.kernel.org/pub/linux/kernel/ and, if needed, write
+       kernel/sources/kernel.pin by hand from the authoritative checksums."
+
 [[ "$SHA" =~ ^[0-9a-f]{64}$ ]] || die "checksum for $TARBALL is not 64 hex chars: $SHA"
+
+DIR=$(dirname "$SUMFILE")
+URL="$DIR/$TARBALL"
+echo
+echo "  directory : $DIR"
+echo "  url       : $URL"
+echo "  sha256    : $SHA   (from $SUMFILE)"
 
 cat <<EOF
 pin to be written:
@@ -157,7 +198,8 @@ set_version "$PIN" sha256 "$SHA"
 # Record the provenance inline so the pin explains itself.
 {
     printf '\n# --- resolved %s by kernel/scripts/resolve-kernel-pin.sh ---\n' "$(date -u +%Y-%m-%d)"
-    printf '# moniker=%s  isodate=%s  released=%s\n' "$MONIKER" "$ISO" "$RELEASED"
+    printf '# moniker=%s  released=%s %s\n' "$MONIKER" "$ISO" "${ISEOL:+(EOL)}"
+    printf '# tarball directory: %s  (current series is filed under v<major>.x)\n' "$DIR"
     printf '# checksum source: %s\n' "$SUMFILE"
     printf '# ARM guidance: latest ACK or latest stable/longterm (see ../BUILD-HOST.md)\n'
 } >> "$PIN"

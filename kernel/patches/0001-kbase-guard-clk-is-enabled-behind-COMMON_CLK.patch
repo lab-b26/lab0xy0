@@ -1,0 +1,73 @@
+Subject: [PATCH] kbase: guard __clk_is_enabled behind CONFIG_COMMON_CLK
+
+Build fix, not a behaviour change.
+
+r54p0 calls __clk_is_enabled() unconditionally in two places in
+mali_kbase_core_linux.c, and includes <linux/clk-provider.h> without a
+guard. The declaration of __clk_is_enabled() in include/linux/clk-provider.h
+is NOT inside an #ifdef CONFIG_COMMON_CLK, so this code compiles cleanly on
+any kernel. The definition, however, lives in drivers/clk/clk.c, which is
+built only as obj-$(CONFIG_COMMON_CLK). Every other clk_* function used at
+these two sites (clk_disable, clk_put, clk_unprepare, clk_prepare) is a
+no-op static inline stub when CONFIG_COMMON_CLK is unset; __clk_is_enabled
+is the one exception, and it has no stub.
+
+Consequence: when CONFIG_COMMON_CLK is unset the module compiles but fails
+to link:
+
+    ERROR: modpost: "__clk_is_enabled" [drivers/gpu/arm/midgard/mali_kbase.ko] undefined!
+
+This is reached on x86_64, where x86_64_defconfig does not enable
+CONFIG_COMMON_CLK (it is an ARM/SoC-centric option with no x86 consumer).
+The same failure applies to any configuration that leaves it off.
+
+Fix: compile the __clk_is_enabled() test only when CONFIG_COMMON_CLK is
+available, and call clk_disable_unprepare() directly otherwise. Behaviour is
+preserved exactly:
+
+  - CONFIG_COMMON_CLK=y: unchanged, the enabled-clock test is performed.
+  - CONFIG_COMMON_CLK=n: clk_disable_unprepare() is a no-op stub, and
+    kbdev->clocks[] is never populated because clk_get() is a stub returning
+    NULL, so the loop body is unreachable in practice.
+
+Choosing this over setting CONFIG_COMMON_CLK=y in the profile fragment keeps
+the kernel configuration at plain x86_64_defconfig, so no configuration delta
+is introduced and the allowlist in research/program-scope.md section 5 is
+untouched.
+
+Validated against: Linux 6.12.111 (x86_64), r54p0-01eac0 with the six
+patches/virtual-device patches applied. See analysis/findings.md F-17.
+
+Applies after: patches/virtual-device/0001-0006.
+
+--- a/product/kernel/drivers/gpu/arm/midgard/mali_kbase_core_linux.c
++++ b/product/kernel/drivers/gpu/arm/midgard/mali_kbase_core_linux.c
+@@ -3289,7 +3289,15 @@
+ regulators_probe_defer:
+ 	for (i = 0; i < BASE_MAX_NR_CLOCKS_REGULATORS; i++) {
+ 		if (kbdev->clocks[i]) {
++#if IS_ENABLED(CONFIG_COMMON_CLK)
+ 			if (__clk_is_enabled(kbdev->clocks[i]))
++#else
++			/* clk_disable_unprepare() is a no-op stub here, and
++			 * kbdev->clocks[] is never populated without the common clock
++			 * framework, so this is equivalent. See analysis/findings.md F-17.
++			 */
++			if (1)
++#endif
+ 				clk_disable_unprepare(kbdev->clocks[i]);
+ 			clk_put(kbdev->clocks[i]);
+ 			kbdev->clocks[i] = NULL;
+@@ -3326,7 +3334,12 @@
+ 
+ 	for (i = 0; i < BASE_MAX_NR_CLOCKS_REGULATORS; i++) {
+ 		if (kbdev->clocks[i]) {
++#if IS_ENABLED(CONFIG_COMMON_CLK)
+ 			if (__clk_is_enabled(kbdev->clocks[i]))
++#else
++			/* See the matching site in kbase_device_backend_init (F-17). */
++			if (1)
++#endif
+ 				clk_disable_unprepare(kbdev->clocks[i]);
+ 			clk_put(kbdev->clocks[i]);
+ 			kbdev->clocks[i] = NULL;

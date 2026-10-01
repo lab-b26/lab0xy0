@@ -10,15 +10,34 @@ Build machinery for the portable lab. These scripts run on the **build host**
 | `preflight.sh` | yes | yes, read-only (correctly reported `NOT READY`) |
 | `bootstrap.sh` | yes | yes, `--check` mode only (read-only) |
 | `codespace-setup.sh` | yes | yes, all modes, against an **isolated repo copy with a fake `HOME`** and stubbed `apt-get`/`sudo`, so the git-identity / SSH / gh logic was exercised without installing anything or touching this host's keys |
-| `resolve-kernel-pin.sh` | yes | **no** — needs network; the pin is still `UNSET` |
-| `fetch-kernel.sh` | yes | **no** — refuses while the pin is `UNSET`, before any network call |
-| `apply-patches.sh` | yes | **no** — patches were applied during analysis, but not via this script |
-| `build.sh` | yes | **control flow only**, against a stubbed kernel tree — never a real kernel |
+| `resolve-kernel-pin.sh` | yes | **yes** — failed first (404s, F-13), fixed, then wrote the real pin |
+| `fetch-kernel.sh` | yes | **yes** — 6.18.54 and 6.12.111, both checksums verified |
+| `apply-patches.sh` | yes | **yes** — 6/6 vendor + 1 research patch applied |
+| `build.sh` | yes | **yes** — a real kernel, twice; the second build succeeded |
 
-`build.sh`'s verification logic (step 5/8) was exercised for all three of its
-outcomes — all symbols set, a symbol absent from the Kconfig, and a value clobbered
-after the merge — and correctly refused to build in the latter two. That is *not*
-the same as having compiled Kbase; no real kernel has been built anywhere.
+### Executed against a real kernel (2026-10-01)
+
+The stubbed-tree test in `build.sh` was **not sufficient**. Running these scripts
+against a real kernel found **three defects that both `bash -n` and the stub
+passed**:
+
+| Script | Defect found only by real execution | Finding |
+|---|---|---|
+| `resolve-kernel-pin.sh` | built `v6.18/…` URLs; kernel.org files the current series under `v6.x`/`v7.x`. Also mis-parsed `releases.json` (whitespace `read` collapsed an empty field, silently shifting the URL into the wrong variable) | **F-13** |
+| `build.sh` | wrote a C comment `/* … */` into `drivers/gpu/Kconfig`; valid in a Makefile, a hard kconfig syntax error. `make defconfig` died | **F-14** |
+| `build.sh` | step 5/8 grepped only `^CONFIG_X=`, so it reported every `=n` line MISSING — including the mandatory `CONFIG_MALI_DEBUG=n`, which is present and correct | **F-15** |
+
+All three are fixed and re-verified. This is recorded rather than quietly fixed
+because the stub was specifically designed to catch this class, and it did not.
+
+Two more failures came from the kernel/Kbase side, not the tooling:
+`__SetPageMovable` removed in v6.17 (**F-16**) and `__clk_is_enabled` never built
+without `CONFIG_COMMON_CLK` (**F-17**). No stub could have found either.
+
+**Known limitation, stated plainly:** step 5/8 verifies `.config`, **not the
+link**. It correctly caught a broken Kconfig and a mis-set option, but it cannot
+see an undefined symbol — that only appears in modpost, after every object has
+already compiled. A build passing step 5/8 is necessary, not sufficient.
 
 ## Scripts (run in this order)
 
@@ -29,7 +48,7 @@ the same as having compiled Kbase; no real kernel has been built anywhere.
 | 0c | `resolve-kernel-pin.sh [--dry-run] [--force]` | picks the newest kernel.org release marked `longterm` (**that set is the LTS series**), takes its SHA-256 from kernel.org's own `sha256sums.asc`, and writes `kernel/sources/kernel.pin`. Implements Arm's "latest ACK or latest stable/longterm" guidance literally. | yes |
 | 1 | `preflight.sh` | read-only host check (arch, disk, RAM, tools, headers, checksums, pin). Exits non-zero if the host cannot build. | no |
 | 2 | `fetch-kernel.sh` | reads `kernel.pin`, downloads the exact tarball, **verifies SHA-256 (fatal on mismatch)**, extracts to `kernel/sources/linux/<version>/`. No floating "latest". | yes |
-| 3 | `apply-patches.sh` | extracts pristine r54p0 to `work/kbase-pristine/` (never patched in place), copies to `work/kbase-patched/`, applies the six Arm patches in order with `patch -p1`, writes the patch-series hash. | no |
+| 3 | `apply-patches.sh` | extracts pristine r54p0 to `work/kbase-pristine/` (never patched in place), copies to `work/kbase-patched/`, applies the six Arm patches in order with `patch -p1`, then applies this project's research patches from `kernel/patches/` **after** them, and writes a separate hash for each series. | no |
 | 4 | `build.sh --profile <p>` | stages Kbase into the kernel tree, kbuild-ifies it, wires `drivers/gpu`, seeds and **verifies** `.config`, compiles the kernel, builds the module, emits metadata. | no |
 
 There is deliberately **one** `build.sh --profile …`, not four
@@ -71,6 +90,20 @@ the profile fragment actually took effect — detecting symbols dropped as unkno
 did not take, it prints a table and exits non-zero *before* compiling, because a
 kernel that quietly lacks Kbase is worse than no kernel.
 
+Two subtleties this check now handles, both learned by getting them wrong:
+
+- **kconfig never writes `CONFIG_X=n`.** A symbol set to `n` appears as
+  `# CONFIG_X is not set`, so matching only `^CONFIG_X=` reports every disabling
+  line as missing (F-15). The check accepts either spelling, and reports MISSING
+  only when the symbol is absent from the Kconfig entirely.
+- **The injected marker must be a `#` comment, not `/* … */`.** The same tag is
+  written to `drivers/gpu/Makefile` *and* `drivers/gpu/Kconfig`; a C comment is
+  valid in the first and a fatal syntax error in the second (F-14).
+
+And what it still cannot do: catch a **link** failure. Every fragment symbol
+verifying correctly does not mean the module links — that is a separate failure
+class which only appears in modpost (F-17).
+
 ## Design rules these scripts follow
 
 - **Repository-relative paths.** No hard-coded host paths, so a clone runs anywhere.
@@ -111,5 +144,15 @@ bash kernel/scripts/apply-patches.sh
 bash kernel/scripts/build.sh --profile baseline
 ```
 
+This exact sequence has now been run (2026-10-01), with one deviation that is
+recorded rather than hidden: `resolve-kernel-pin.sh` selected 6.18.54, the
+newest LTS, and that kernel **cannot build Kbase** (F-16). The pin was moved to
+**6.12.111** — the newest LTS that does build — and `kernel/sources/kernel.pin`
+records both the rejected candidate and the reason.
+
 Then follow `../BUILD-PLAN.md` for baseline validation, the instrumented
 profiles, rootfs/QEMU, packaging, and the clean-location portability test.
+
+**On a 32 GB build host**, build one profile, package and checksum it, then
+delete the tree before the next (measured costs: 141 MB tarball, ~1.7 GB
+extracted, ~1.5 GB per `O=` output, ~15 min compile on 4 jobs).

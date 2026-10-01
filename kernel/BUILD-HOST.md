@@ -4,6 +4,11 @@ The build happens **somewhere other than the machine that organised this repo.**
 This file states what that machine must have, and records why the organising host
 was ruled out. Read it before starting a build.
 
+**A build host has now been used** (a GitHub Codespace, 4 cores / 16 GB /
+32 GB disk) and the `baseline` profile compiles and links on Linux 6.12.111 there
+(`../analysis/findings.md` F-18). The requirements below are what that host had
+to satisfy; the *measured* numbers are further down.
+
 ## The organising host is NOT a build host — VERIFIED measurements
 
 Measured on the host that produced this repository. Do not build here.
@@ -74,14 +79,38 @@ sudo modprobe kvm        # optional; without it QEMU falls back to TCG (slow)
 
 ## What must NOT be assumed
 
-- The Linux version is **not** pinned in this repository yet. Resolve it on the
-  build host with `scripts/resolve-kernel-pin.sh`, which implements Arm's "latest
-  stable/longterm" guidance from kernel.org's own metadata, and then **commit the
-  pin** so the choice is reproducible rather than local to one machine.
+- The Linux version is **pinned**: `6.12.111` in `scripts/kernel.pin`, chosen by
+  `scripts/resolve-kernel-pin.sh` and then confirmed by an actual build. Arm's
+  "latest stable/longterm" guidance pointed at 6.18.54, and **that kernel does
+  not build r54p0** (F-16), so the newest LTS is not automatically the right
+  one. Re-resolve only deliberately, and expect to re-verify with a build.
 - The config fragments in `kernel/configs/` are **provisional**; the real baseline
   `.config` is produced on the build host from a default kernel config plus the
-  minimum Kbase requirements.
-- Nothing here has been compiled or booted; `research/state.md` is `NOT_STARTED`.
+  minimum Kbase requirements. The `baseline` fragment is now VERIFIED against
+  6.12.111; the other three are not.
+- The `baseline` kernel **compiles and links but has never booted or been
+  loaded**; `research/state.md` is still `NOT_STARTED`.
+
+## Measured on the real build host (2026-10-01)
+
+The table above is the *plan*. These are the *measurements* from the Codespace
+that actually ran the build, which is what you should size against:
+
+| Item | Measured |
+|---|---|
+| Machine used | 4 cores, 16 GB RAM, **32 GB** disk, `/dev/kvm` present |
+| Linux tarball | 141 MB |
+| Extracted source | ~1.7 GB |
+| One `O=` output, after build | ~1.5 GB |
+| Peak disk for one profile | **~4.5 GB** |
+| Kernel compile, `-j4` | **~15 min** |
+| `preflight.sh` verdict | `READY` (disk warning only) |
+
+The 32 GB disk is **below** the 25 GB "comfortable" figure in the plan, so
+`preflight.sh` warns and `codespace-setup.sh --check` reports it as a problem.
+In practice it is enough for **one profile at a time**, which is how it was run.
+The 64 GB machine remains preferable if you want to build an instrumented
+profile without pruning first.
 
 ## GitHub Codespaces as the build host
 
@@ -116,6 +145,13 @@ Because there is no devcontainer, `codespace-setup.sh` is what installs the
 toolchain — run it once, first. It handles the non-package prerequisites that
 otherwise fail confusingly:
 
+> **Verified on a real Codespace (2026-10-01).** The whole sequence below ran
+> end to end on a 4-core / 16 GB / 32 GB machine, and the build succeeded on
+> 6.12.111 (F-18). One correction to the advice above: **32 GB of disk is
+> workable** — it is below the comfortable threshold, so `preflight.sh` warns
+> rather than fails, and one profile at a time fits in ~4.5 GB. The 64 GB
+> machine is still preferable, but a 32 GB codespace is not a blocker.
+
 - **machine spec**, checked before you start a build rather than after — this is
   now your only guard, since nothing auto-selects a big enough machine;
 - **git identity**, because the step that makes the kernel reproducible
@@ -127,9 +163,11 @@ otherwise fail confusingly:
 `codespace-setup.sh` deliberately does **not** fetch a kernel, build anything, or
 write the pin. Those stay separate, deliberate steps.
 
-Disk note: one extracted Linux tree plus one `O=` output is ~3 GB. Building several
-profiles at once needs 40 GB+; `build.sh` keeps one shared source tree precisely so
-you can build profiles one at a time and prune between them.
+Disk note: measured on the real build host, one extracted Linux tree plus one
+`O=` output plus the tarball is **~4.5 GB**, and a full `-j4` compile takes
+**~15 min**. So a 32 GB disk fits one profile comfortably and two if you prune
+between them; four at once needs 40 GB+. `build.sh` keeps one shared source tree
+precisely so you can build profiles one at a time and prune between them.
 
 ## Scope reminder
 

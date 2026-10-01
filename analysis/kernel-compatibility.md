@@ -5,11 +5,18 @@
 ```text
 VERIFIED OBSERVED VERSION-GATE RANGE: 3.17.0  →  6.13.0   (r54p0, 44 distinct gates)
 
-Required kernel version for the first build: UNKNOWN
+VERIFIED BUILD RESULT:  6.12.111  compiles AND links (findings.md F-18)
+VERIFIED BUILD FAILURE: 6.18.54   does not compile (findings.md F-16)
+Pinned kernel:           6.12.111
 ```
 
 The observed range is **not** a support statement. See "What this range does and
-does not mean" below.
+does not mean" below. What the two builds add is a *real* boundary, and it does
+not coincide with the highest gate: the driver stops compiling at 6.17, four
+versions above its own highest `KERNEL_VERSION` test, because it calls an API
+that was removed without a gate around it. That is the clearest available
+demonstration of the rule in `../research/methodology.md`: **a version gate is
+not a ceiling, and it is not a support claim.**
 
 ## Method
 
@@ -170,9 +177,39 @@ Not yet executed. Sketch only:
    allowlist (`research/program-scope.md` §5).
 6. Record the configuration that actually builds as `VERIFIED`.
 
+## RESOLVED by build — 6.12.111 (2026-10-01)
+
+The version question above is now **decided by evidence, not by argument**:
+
+```text
+6.18.54  (newest LTS)  FAILS   r54p0 calls __SetPageMovable, removed in v6.17
+6.12.111               BUILDS  compiles AND links; see findings.md F-18
+```
+
+So the answer to "which exact kernel version" is **6.12.111**, pinned with a
+checksum in `../kernel/sources/kernel.pin`, and both the accepted and the
+rejected candidate are recorded there.
+
+The compatibility picture is now bracketed rather than open-ended:
+
+| Range | Status |
+|---|---|
+| 3.17 – 6.12 | **VERIFIED to compile and link** (6.12.111) |
+| 6.13 – 6.16 | **UNKNOWN** — the symbols F-16 needs still exist (v6.16 is the last release that has them) |
+| 6.17 + | **VERIFIED NOT to compile** (F-16) |
+
+The 6.13–6.16 gap is the interesting one, and it is the range r54p0's own
+highest gate (6.13.0) was written for. Testing it would tell us whether F-16 is
+a hard API ceiling or something a research patch can lift — which determines
+whether a modern LTS is reachable at all for this driver. That is the obvious
+next kernel experiment, and it is a one-line pin change plus a rebuild.
+
 ## Not yet verified
 
-- Compilation on any kernel version (NOT TESTED).
+- Whether 6.13–6.16 builds (see above). The tested kernels are 6.12.111 (yes)
+  and 6.18.54 (no); the range between them is untested.
+- Whether the module **loads**, and whether the `NO_MALI` harness initialises at
+  all. Compilation is not initialisation (F-18).
 - Whether the 4.1 polarity change in patch 0001 is safe for the eventual target
   kernel (UNKNOWN until a build exists).
 - Maximum supported kernel version — 6.13.0 is merely the **highest gate present**

@@ -1,0 +1,2 @@
+2748:/workspaces/lab0xy0/kernel/sources/linux/6.18.54/drivers/gpu/arm/midgard/mali_kbase_mem_migrate.c:83:9: error: implicit declaration of function ‘__SetPageMovable’; did you mean ‘__SetPageTable’? [-Werror=implicit-function-declaration]
+2753:/workspaces/lab0xy0/kernel/sources/linux/6.18.54/drivers/gpu/arm/midgard/mali_kbase_mem_migrate.c:158:25: error: implicit declaration of function ‘__ClearPageMovable’; did you mean ‘__ClearPageTable’? [-Werror=implicit-function-declaration]

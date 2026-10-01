@@ -1,19 +1,34 @@
-# Kernel — PLANNED, nothing built
+# Kernel — one profile COMPILES AND LINKS, nothing booted
 
-**No Linux kernel has been selected, downloaded, extracted, configured, or built.**
-The build is **deferred to a separate build host** (see `BUILD-HOST.md`); this
-directory holds the reproducible *machinery* and the build *plan*, not build
-products.
+A Linux kernel **has** been selected, fetched, configured, and built: the
+`baseline` profile on **6.12.111** produces `mali_kbase.ko` and a `bzImage`
+(`../analysis/findings.md` F-18). Nothing has been **booted, loaded, or
+packaged**, and no artifact exists.
+
+This directory holds the reproducible *machinery* and the build *plan*, not
+build products — the source tree, the `O=` outputs and the staged Kbase tree are
+all git-ignored and recreated on the build host (see `BUILD-HOST.md`).
+
+Getting to a successful build took three attempts. The newest LTS, as Arm's
+guidance asks for, does **not** work: r54p0 calls `__SetPageMovable`, removed
+upstream in v6.17 (F-16). The pin is therefore 6.12.111, the newest LTS that
+does build, and both the choice and the rejection are recorded in
+`sources/kernel.pin`.
 
 ## Status
 
 ```text
-Kernel version selected:      UNKNOWN (pin file present, set to UNSET)
+Kernel version selected:      6.12.111  (VERIFIED by build; newest LTS 6.18.54
+                                       does NOT build — findings.md F-16)
 Kernel source in repo:        none (fetched on the build host, git-ignored)
-Build directory:              none
+Build directory:              none (build/ is git-ignored)
 .config in repo:              none (configs/ holds provisional fragments)
-Build log:                    none
-Any of the above reproduced:  NOT TESTED
+Build log:                    kept on the build host; failure logs archived at
+                              ../research/build-logs/
+baseline profile:             COMPILES AND LINKS (findings.md F-18)
+                             NOT booted, NOT loaded, NOT packaged
+kasan / kcov / debug:         PLANNED, not attempted
+Any of the above reproduced:  the 6.12.111 build, on a 4-core Codespace
 ```
 
 ## Contents
@@ -21,11 +36,11 @@ Any of the above reproduced:  NOT TESTED
 | Path | Purpose | Status |
 |---|---|---|
 | `BUILD-HOST.md` | what the build machine needs; why this repo's host isn't one | VERIFIED (measurements) |
-| `BUILD-PLAN.md` | the deferred phase-2 build plan, step by step | PLANNED |
-| `configs/` | four provisional kernel config fragments | PLANNED |
-| `scripts/` | preflight / fetch-kernel / apply-patches / build (see `scripts/README.md`) | written, not executed |
-| `sources/kernel.pin` | the single place a kernel version + checksum is named | UNSET |
-| `patches/` | research-authored patches (not vendor patches) | empty (one known need, see `patches/README.md`) |
+| `BUILD-PLAN.md` | the phase-2 build plan; steps 1–5 now executed | PARTIALLY EXECUTED |
+| `configs/` | four provisional kernel config fragments | baseline VERIFIED against 6.12.111; others provisional |
+| `scripts/` | preflight / fetch-kernel / apply-patches / build (see `scripts/README.md`) | executed; three defects found and fixed (F-13/F-14/F-15) |
+| `sources/kernel.pin` | the single place a kernel version + checksum is named | 6.12.111, with the rejected candidate recorded |
+| `patches/` | research-authored patches (not vendor patches) | 1 patch, applied and validated (F-17) |
 | `README.md` | this file | VERIFIED (as a description) |
 
 Vendor-supplied patches are **not** stored here — they live in
@@ -56,6 +71,15 @@ Two constraints now bound every profile:
   (DECISION-1, §8.5), because it needs `MALI_PLATFORM_NAME="vexpress"` and a GPU
   target, neither of which is on the §8.3 allowlist. No build in it is a validation
   environment.
+- **The configuration stays at plain `x86_64_defconfig`.** `baseline` is
+  VERIFIED to build and link that way, with no config delta at all. A needed
+  kernel option was fixed with a research patch instead of a fragment line
+  precisely so no §5 delta is introduced (F-17, `patches/README.md`).
+
+`baseline` is now VERIFIED **compiled and linked** on 6.12.111 (F-18): the
+`vexpress` backend, the `tDRx` target, and `MALI_DEBUG=n` are all confirmed
+present in the resulting module. Not loaded, not booted — see
+`../research/state.md` for why the state is still `NOT_STARTED`.
 
 ### The `kcov` profile blocker
 
@@ -93,10 +117,19 @@ symbol that would be silently ignored.
 
 The kernel is pinned in exactly one place: `sources/kernel.pin` (`version`, `url`,
 `sha256`). `scripts/fetch-kernel.sh` refuses to download without a checksum, uses
-no floating "latest", and treats a checksum mismatch as fatal. The version itself
-is still **UNSET** — it is chosen on the build host per Arm guidance (latest
-suitable stable/LTS) and recorded in `../analysis/kernel-compatibility.md` once
-decided. Do not hard-code a guess here.
+no floating "latest", and treats a checksum mismatch as fatal.
+
+**Currently pinned: 6.12.111.** The pin file also records the *rejected*
+candidate, 6.18.54, and why — the newest LTS per Arm's guidance does **not**
+build r54p0, because `__SetPageMovable` was removed upstream in v6.17 and r54p0
+calls it unguarded (`../analysis/findings.md` F-16). That is why this pin is not
+the newest LTS, and it is the reason to keep the rejected entry in the file
+rather than overwriting it.
+
+Note the URL shape: kernel.org files the current series under `v<major>.x`
+(`v6.x`, `v7.x`), **not** per-point `v6.18` / `v6.12` directories, which 404.
+`resolve-kernel-pin.sh` takes the location from `releases.json` and verifies the
+tarball is listed before pinning (F-13).
 
 ## Reproducibility rules for the build phase — PLANNED
 
