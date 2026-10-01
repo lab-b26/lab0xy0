@@ -53,7 +53,7 @@ never "the driver is correct on hardware".
 
 | Profile | Result | Notes |
 |---|---|---|
-| `baseline` | PASS ×4 | four independent boots, consistent |
+| `baseline` | PASS ×7 | includes two **clean-location** runs booted from `/tmp` with `build/` renamed away (F-22) |
 | `kasan` | PASS | `kasan: KernelAddressSanitizer initialized`; zero sanitizer reports |
-| `kcov` | pending | build in progress |
+| `kcov` | not yet | builds (E-009); not booted |
 | `debug` | not started | |

@@ -9,7 +9,44 @@ work**; they consume prebuilt components and never invoke a kernel build.
 |---|---|---|
 | `run.sh` | launch a prebuilt, packaged profile artifact (profile-agnostic) | EXISTS, used |
 | `verify-boot.sh` | boot the artifact and assert Kbase loads + target interface responds | EXISTS, used |
-| `build-env.sh` | build/package the QEMU-side environment once | NOT NEEDED — the rootfs builder (`../rootfs/build-rootfs.sh`) and the kernel builder (`../../kernel/scripts/build.sh`) already cover both halves |
+| `package-artifact.sh` | bundle one profile's components into a self-contained artifact | EXISTS, used |
+| `build-env.sh` | build/package the QEMU-side environment once | SUPERSEDED by `package-artifact.sh` + `../rootfs/build-rootfs.sh` + `../../kernel/scripts/build.sh` |
+
+## `package-artifact.sh`
+
+```text
+qemu/scripts/package-artifact.sh --profile <name> [--out DIR] --validation-state STATE
+```
+
+Collects `kernel/{bzImage,vmlinux,config}`, `modules/` (all `.ko`, in-tree paths
+preserved), this profile's rootfs, and writes `metadata/manifest.json`,
+`metadata/SHA256SUMS`, and a runnable `README.md`.
+
+Three deliberate constraints:
+
+- **It never builds.** A missing component is a hard error, not a silent omission —
+  an artifact missing its kernel fails later and further away than this check does.
+  It also requires the *profile-specific* rootfs (`rootfs-<profile>.cpio.gz`),
+  because a rootfs built for another profile would embed the wrong `.ko` and
+  produce a plausible-looking wrong artifact.
+- **`--validation-state` is a required claim and is validated against the
+  allowlist** in `artifacts/README.md`, so `PORTABLE_ARTIFACT_VERIFIED` cannot be
+  asserted by accident. It records reproducibility, never conformance.
+- **It fails loudly if a host path could leak in.** The generated manifest and
+  README carry no absolute paths, so a bundle is genuinely relocatable.
+
+### The portability defect this found
+
+Packaging `baseline` exposed a bug that "it boots" would never have caught:
+`run.sh` resolved `bzImage` from the artifact but the **rootfs only from
+`build/rootfs/`**. Every relocated bundle would therefore have depended on the
+repo's build tree, quietly defeating the purpose of the artifact. The rootfs now
+uses the same artifact-first candidate order as the kernel. Recorded as F-22.
+
+The general lesson, and why the clean-location test is written the way it is:
+**self-containment can only be tested by removing the thing you claim not to
+depend on.** `verify-boot.sh` was run with the whole `build/` directory renamed
+away, not merely from a different working directory.
 
 The project spec deliberately does **not** ask for
 `build-baseline.sh` / `build-kcov.sh` / `build-kasan.sh` / `build-debug.sh` here or
@@ -22,9 +59,10 @@ qemu/scripts/run.sh --profile <baseline|kcov|kasan|debug> [options] [-- extra qe
 ```
 
 Resolves, in order: an explicit `--artifact DIR`, else `artifacts/<profile>`, else
-`build/<profile>` as a fallback for pre-packaging use. `--rootfs` overrides the
-initramfs, `--serial FILE` captures the console, `--accel` forces `kvm`/`tcg`/
-`auto`, `--interactive` keeps the guest alive on stdin instead of powering off.
+`build/<profile>` as a fallback for pre-packaging use. **Both** the kernel and the
+rootfs resolve artifact-first; `--rootfs` overrides the initramfs, `--serial FILE`
+captures the console, `--accel` forces `kvm`/`tcg`/`auto`, `--interactive` keeps
+the guest alive on stdin instead of powering off.
 
 Two environment realities are handled explicitly:
 

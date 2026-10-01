@@ -35,16 +35,20 @@ Status words: `NOT_STARTED`, `PASS`, `FAIL`, `PARTIAL`, `UNKNOWN`, `N/A`.
 | E-005 | Establish NO_MALI swap surface (what stays in scope) | n-a | r54p0-01eac0 | n-a | n-a | n-a | see F-8 | N/A | N/A | N/A | N/A | N/A | N/A | `csf/Kbuild:49-56` swaps 2 objects; ioctl/MMU/mem paths remain; `analysis/findings.md` F-8 |
 | E-006 | Boot 6.12.111 + `baseline`, load Kbase, exercise the EL0 ioctl surface | `baseline` | r54p0-01eac0 | 6.12.111 | vendor 0001–0006 + research 0001 (F-17) | `515ce13d…823e9` | PASS | PASS | PASS | N/A | N/A | NOT_PACKAGED | `insmod` rc=0; `GPU identified as 0x0 arch 14.8.5 r0p0` (tDRx); `/dev/mali0` 10,258; probe `passed=0x1ff failed=0x000`. Two undocumented contracts found: `SET_FLAGS` mandatory before other ioctls; `MEM_ALLOC.out.gpu_va` is a `SAME_VA` cookie requiring `mmap`. `research/boot-logs/*-baseline-BOOT.log`; `analysis/findings.md` F-19 |
 | E-007 | Repeat E-006 under KASAN; does the instrumented driver run clean? | `kasan` | r54p0-01eac0 | 6.12.111 | vendor 0001–0006 + research 0001 (F-17) | `5af7eca0…aa99` | PASS | PASS | PASS | N/A | N/A | NOT_PACKAGED | `kasan: KernelAddressSanitizer initialized`; all 5 verify-boot assertions ok; probe `passed=0x1ff failed=0x000`; **zero** KASAN reports (grepped `BUG: KASAN`/`use-after-free`/`*-out-of-bounds`: none) and zero `BUG:`/`WARNING:`/`Call Trace:`. Clean run of the **probe path only** — not a fuzzing result. `research/boot-logs/20261001T090429Z-kasan-BOOT.log`; F-19 |
+| E-008 | Can the baseline be packaged and booted from a clean location? | `baseline` | r54p0-01eac0 | 6.12.111 | vendor 0001–0006 + research 0001 (F-17) | `515ce13d…823e9` | PASS | PASS | PASS | N/A | N/A | **PASS (`PORTABLE_ARTIFACT_VERIFIED`)** | Bundle `artifacts/baseline` (68 MB, 16 files, id `kbase-r54p0-01eac0-6.12.111-baseline`); `sha256sum -c` 16/16 OK from a copy; booted from `/tmp` **with `build/` renamed away** → all 5 assertions ok. Surfaced a real defect: `run.sh` resolved the rootfs only from `build/rootfs/`, making relocated bundles repo-dependent; fixed. `analysis/findings.md` F-22 |
+| E-009 | Does `kcov` build at all in-tree? | `kcov` | r54p0-01eac0 | 6.12.111 | vendor 0001–0006 + research 0001 (F-17) | `2b3142d9…c7b7` | PASS | NOT TESTED | NOT TESTED | NOT TESTED | N/A | NOT_PACKAGED | Build succeeded (15/15 fragment symbols, `CONFIG_KCOV=y` + `INSTRUMENT_ALL=y`); `bzImage` 17 MB, `mali_kbase.ko` 3.5 MB. **Kernel-side coverage only** — Kbase itself is still uninstrumented (F-2: `MALI_KCOV` exists only in the Android/SCons `Mconfig`, never read by an in-tree build). Not booted, so the Coverage columns stay `NOT TESTED` |
 
-Notes on the two rows above:
+Notes on the rows above:
 
-- **Scope class for both is DISCOVERY-ONLY** (DECISION-1). The x86_64 +
+- **Scope class for all of these is DISCOVERY-ONLY** (DECISION-1). The x86_64 +
   `MALI_NO_MALI` harness cannot produce Arm-conforming validation evidence
-  regardless of how clean the run is.
-- **`NOT_PACKAGED` is deliberate and accurate.** No artifact bundle exists yet
-  (`artifacts/` holds only its README), so the Artifact column must not read
-  `PASS` for any row. The portability procedure in `../artifacts/README.md` has
-  not been run.
+  regardless of how clean the run is. `PORTABLE_ARTIFACT_VERIFIED` in E-008 is a
+  *reproducibility* result, not a conformance one.
+- **`NOT_PACKAGED` is accurate** for E-006/E-007: those runs predate packaging.
+  Only `baseline` has a bundle today.
+- **E-009 is a build result only.** It records that `kcov` compiles; the coverage
+  columns stay `NOT TESTED` until it is actually booted, and Kbase-level coverage
+  stays blocked on F-2 regardless.
 - **Kernel release 6.12.111** because 6.18.54 does not build (F-16). Coverage
   (`KCOV`) columns stay `N/A` until a `kcov` profile is built and booted.
 - E-007 required fixing the fragment merge first: the old `build.sh` deleted

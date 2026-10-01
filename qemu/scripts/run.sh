@@ -99,8 +99,24 @@ Looked in:
   $BUILD_ROOT/$PROFILE/arch/x86/boot/bzImage
 Build it first:  kernel/scripts/build.sh --profile $PROFILE"
 
-[ -n "$ROOTFS" ] || ROOTFS="$BUILD_ROOT/rootfs/rootfs-$PROFILE.cpio.gz"
-[ -f "$ROOTFS" ] || die "no rootfs at $ROOTFS
+# The rootfs must resolve from the artifact too, not just from build/rootfs/.
+# A bundle that could only boot while the repo's build tree was still present
+# would not be self-contained, which is the whole point of packaging one
+# (see ../../artifacts/README.md). Same candidate order as the kernel: artifact
+# first, build tree only as a pre-packaging fallback.
+ROOTFS=""
+for cand in \
+    "$ARTIFACT/rootfs/rootfs-$PROFILE.cpio.gz" \
+    "$ARTIFACT/rootfs/rootfs.cpio.gz" \
+    "$BUILD_ROOT/rootfs/rootfs-$PROFILE.cpio.gz"
+do
+    if [ -f "$cand" ]; then ROOTFS="$cand"; break; fi
+done
+[ -n "$ROOTFS" ] || die "no rootfs for profile '$PROFILE'.
+Looked in:
+  $ARTIFACT/rootfs/rootfs-$PROFILE.cpio.gz
+  $ARTIFACT/rootfs/rootfs.cpio.gz
+  $BUILD_ROOT/rootfs/rootfs-$PROFILE.cpio.gz
 Build it first:  qemu/rootfs/build-rootfs.sh --profile $PROFILE"
 
 # --- accelerator selection -------------------------------------------------

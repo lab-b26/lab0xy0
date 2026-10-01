@@ -1007,6 +1007,51 @@ identical to baseline/kcov/debug, and consistent with DECISION-2. This is a
 **harness requirement, not a conformance claim**: per DECISION-1 the profile
 remains DISCOVERY-ONLY, while `CONFIG_KASAN*` itself stays allowlisted (§5).
 
+## F-22 — VERIFIED: the baseline artifact is `PORTABLE_ARTIFACT_VERIFIED`
+
+**Status: RESOLVED POSITIVE.** Category: `artifact`. The first artifact in the
+project, and the first state in `artifacts/README.md`'s ladder that required the
+*bundle* — not its parts — to be tested.
+
+```text
+artifact      artifacts/baseline  (68 MB, 16 files)
+identity      kbase-r54p0-01eac0-6.12.111-baseline
+contents      kernel/{bzImage,vmlinux,config}, modules/ (10 .ko),
+              rootfs/rootfs-baseline.cpio.gz, metadata/{manifest.json,SHA256SUMS}
+integrity     sha256sum -c metadata/SHA256SUMS -> 16/16 OK (from a copy)
+portability   booted from /tmp/... (outside the repo) with the build tree
+              RENAMED AWAY -> all 5 assertions PASS
+validation    PORTABLE_ARTIFACT_VERIFIED
+scope class   DISCOVERY-ONLY (DECISION-1)
+```
+
+The clean-location test was run **twice**, and the second run is the one that
+counts: the whole `build/` directory was `mv`'d out of the repo before booting, so
+any hidden dependency on the build tree would have failed loudly rather than
+quietly resolving. `run.sh` resolves `bzImage` *and* the rootfs from inside the
+bundle.
+
+### One real portability defect found and fixed by doing this
+
+`run.sh` resolved the kernel from the artifact but the **rootfs only from
+`build/rootfs/`**. A relocated bundle would therefore still have depended on the
+repo's build tree — exactly the thing the artifact is supposed to eliminate, and
+exactly the kind of flaw that stays invisible until someone actually tries to
+relocate the bundle. Fixed by giving the rootfs the same
+artifact-first/build-tree-fallback candidate order as the kernel.
+
+The lesson generalises: **self-containment is a property you can only test by
+removing the thing you are supposed to depend on.** "It boots" was never the test;
+"it boots with the build tree gone" is.
+
+### Scope limit
+
+`PORTABLE_ARTIFACT_VERIFIED` means *reproducible and relocatable*. It does **not**
+mean conforming, safe, or hardware-validated. The bundle is `MALI_NO_MALI` on
+x86_64, so it is `DISCOVERY-ONLY` per DECISION-1, and no result from it is
+Arm-conforming evidence. The manifest records both fields separately so the
+portability result cannot be misread as a conformance result.
+
 ## Consolidated unknowns
 
 1. ~~Whether r54p0 + all six patches compiles on any x86_64 Linux kernel.~~
