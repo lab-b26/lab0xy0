@@ -291,9 +291,19 @@ This is the reason r54p0 is the primary target and the reason the project brief'
 
 ---
 
-## F-6 — CURRENT RESOURCE CONSTRAINT (build-phase blocker)
+## F-6 — RESOLVED: resource constraint (build-phase blocker)
 
-**Status: VERIFIED on this host.**
+**Status: RESOLVED 2026-10-01 — the constraint was real and it was worked
+around, exactly as predicted below.** The measurements are kept unedited because
+they are what justified the codespace build host; the note records what actually
+happened.
+
+The blocker was solved by building on a different machine, not by shrinking the
+build. `baseline` then compiled and linked on Linux 6.12.111 in a 4-core /
+16 GB / **32 GB**-disk Codespace (F-18). The 32 GB disk is *below* the 256 GB
+ideal and below the 25 GB "comfortable" threshold in `../kernel/BUILD-HOST.md`,
+so `preflight.sh` warns and one profile at a time is required (~4.5 GB peak,
+prune between). The original measurements below are retained verbatim.
 
 | Resource | This host | Arm's documented tested baseline |
 |---|---|---|

@@ -5,18 +5,24 @@ Current state: NOT_STARTED
 Updated:        2026-10-01
 ```
 
-A build is running on the build host right now (`baseline`, Linux 6.12.111,
-with `kernel/patches/0001-*`). `NOT_STARTED` is still correct until that
-succeeds *and* its verification checklist is run: three separate builds have
-now been attempted and three distinct blockers found (F-14, F-16, F-17). The
-`NOT_STARTED` label is being earned, not assumed.
+The `baseline` profile **compiles and links** on Linux 6.12.111
+(`analysis/findings.md` F-18), so `BASELINE_BUILT`'s exit criterion — "baseline
+kernel built and its log kept" — is now met on the evidence. The state is left
+at `NOT_STARTED` deliberately, for two reasons that should not be quietly
+skipped:
 
-`NOT_STARTED` is correct for this phase. This repository is in the
-**organisation + source-analysis + scope-evidence** phase: nothing has been built,
-booted, loaded, or fuzzed. Evidence gathered so far (source inventory, patch
-applicability, program scope, kernel-version analysis) is real, but it does not
-satisfy any of the build states below — those each require an executed command
-whose output is recorded.
+1. The ladder says advance **one** state at a time, and the seven states below
+   `NOT_STARTED` were never formally signed off — they were evidenced during
+   organisation but the transition was not recorded. Retro-fitting them now, on
+   the strength of a build that succeeded, would be bookkeeping after the fact.
+2. A compile is not a running driver. Nothing has been **booted or loaded**, so
+   no behavioural claim exists yet, and `KBASE_LOAD_VERIFIED` is the state that
+   would actually say anything about Kbase working.
+
+The honest next action is the `NOT_STARTED` → `SOURCE_INVENTORIED` …
+`BASELINE_BUILT` walk, each with its checklist attached, and then step 7 of
+`../kernel/BUILD-PLAN.md`: boot the kernel and `insmod` the module. Nothing has
+been booted, loaded, or fuzzed.
 
 ## State ladder
 
