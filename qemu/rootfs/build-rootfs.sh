@@ -136,203 +136,27 @@ gcc -std=gnu11 -O2 -Wall -Wextra -static -I "$UAPI_INCLUDE" \
     -o "$STAGE/bin/kbase-probe" "$PROBE_SRC" \
     || die "failed to build kbase-probe"
 
-# kcov-ctl drives KCOV's ioctl protocol and reports real errnos.
-#
-# The protocol is NOT a write() and NOT self-evident from the node name:
-#   KCOV_INIT_TRACE  allocates the coverage area for this task
-#   KCOV_ENABLE      starts collection  (requires the area: without
-#                    INIT_TRACE this fails -EINVAL, see kcov_ioctl_locked)
-#   KCOV_DISABLE     stops collection
-# A child forked after ENABLE reports into the parent's REMOTE area, which is
-# what makes "run the probe in a child, then read the parent's counters" work.
-#
-# busybox's `echo >` gives EINVAL with no explanation and cannot express
-# INIT_TRACE at all, so this has to be a real program.
-cat > "$STAGE/kcov-ctl.c" <<'KCOV_EOF'
-#include <errno.h>
-#include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/ioctl.h>
-#include <sys/mman.h>
-#include <sys/wait.h>
-#include <unistd.h>
+# kbase-negargs is the probe's sibling: it proves kbase REJECTS malformed ioctls,
+# not just that it accepts good ones (source-audit seam coverage: alias/tiler/
+# kcpu/flags-change validation -- the CVE classes catalogued in F-37).
+# Same static build, same UAPI headers, no other dependencies.
+NEGARGS_SRC="$REPO_ROOT/qemu/target/kbase-negargs.c"
+[ -f "$NEGARGS_SRC" ] || die "negargs source missing: $NEGARGS_SRC"
+gcc -std=gnu11 -O2 -Wall -Wextra -static -I "$UAPI_INCLUDE" \
+    -o "$STAGE/bin/kbase-negargs" "$NEGARGS_SRC" \
+    || die "failed to build kbase-negargs"
 
-#include <linux/kcov.h>
-
-#define KCOV_PATH "/sys/kernel/debug/kcov"
-
-static int fail(const char *what, int err)
-{
-	fprintf(stderr, "%s: %s\n", what, strerror(err));
-	return 1;
-}
-
-static int cmp_ulong(const void *a, const void *b)
-{
-	unsigned long x = *(const unsigned long *)a;
-	unsigned long y = *(const unsigned long *)b;
-	return (x > y) - (x < y);
-}
-
-int main(int argc, char **argv)
-{
-	/*
-	 * One invocation runs the WHOLE cycle, because kcov state is
-	 * per-open-file: INIT_TRACE on one fd and ENABLE on another leaves the
-	 * second fd with no area, and ENABLE then fails -EINVAL. Holding one fd
-	 * across init -> enable -> collect -> count -> disable is not a
-	 * convenience, it is a requirement.
-	 *
-	 * The sequence is FIXED and the command to be measured is simply
-	 * argv[1..]. An earlier version took an explicit command list where
-	 * `run` swallowed the remaining argv, so a trailing `count` was never
-	 * reached and the tool printed success having read no counters. Making
-	 * the order non-negotiable removes that whole class of mistake.
-	 */
-	if (argc < 2) {
-		fprintf(stderr, "usage: kcov-ctl <command> [args...]\n"
-			"Runs the command under KCOV and reports the number of\n"
-			"distinct PCs it covered.\n");
-		return 2;
-	}
-
-	int fd = open(KCOV_PATH, O_RDWR);
-	if (fd < 0)
-		return fail("open " KCOV_PATH, errno);
-
-	/*
-	 * KCOV_INIT_TRACE takes the area SIZE IN WORDS as the ioctl argument
-	 * itself, not a pointer to it, and rejects size < 2. The header's
-	 * _IOR('c', 1, unsigned long) makes a pointer look expected; it is
-	 * not. kcov_ioctl_locked() does `size = arg; if (size < 2 || size >
-	 * INT_MAX/sizeof(long)) return -EINVAL;`, so passing a pointer fails
-	 * -EINVAL. 256 KiB / 8 = 32768 words.
-	 */
-	const unsigned long area_words = 256 * 1024 / 8;
-	if (ioctl(fd, KCOV_INIT_TRACE, area_words) < 0) {
-		int e = errno;
-		close(fd);
-		return fail("KCOV_INIT_TRACE", e);
-	}
-	printf("KCOV init-trace ok (area=%lu words / %lu KiB)\n",
-	       area_words, area_words * sizeof(unsigned long) / 1024);
-
-	if (ioctl(fd, KCOV_ENABLE, 0) < 0) {
-		int e = errno;
-		close(fd);
-		return fail("KCOV_ENABLE", e);
-	}
-	printf("KCOV enable ok (collecting)\n");
-
-	/* Fork: the child is covered and reports into this task's REMOTE area. */
-	pid_t pid = fork();
-	if (pid < 0) {
-		int e = errno;
-		close(fd);
-		return fail("fork", e);
-	}
-	if (pid == 0) {
-		execvp(argv[1], &argv[1]);
-		fprintf(stderr, "exec %s: %s\n", argv[1], strerror(errno));
-		_exit(127);
-	}
-
-	int status = 0;
-	if (waitpid(pid, &status, 0) < 0) {
-		int e = errno;
-		close(fd);
-		return fail("waitpid", e);
-	}
-	int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-	printf("KCOV run: %s exited %d\n", argv[1], code);
-
-	/*
-	 * Counters are obtained by MMAP, not read(). kcov_fops has no .read
-	 * handler at all (only open/ioctl/mmap/release), so read() on the node
-	 * returns -EINVAL regardless of kernel state.
-	 *
-	 * Two kernel constraints, both from kcov_mmap():
-	 *   - vm_pgoff must be 0;
-	 *   - vm_end - vm_start must EXACTLY equal kcov->size * sizeof(long),
-	 *     so the mapping length must be the size passed to
-	 *     KCOV_INIT_TRACE — not a rounded-up page count, which is -EINVAL.
-	 *
-	 * LAYOUT: this is a PC LIST, not a bitset.
-	 * __sanitizer_cov_trace_pc() stores `area[0] = number of PCs recorded
-	 * so far` and appends each canonicalised PC at `area[pos]`, incrementing
-	 * pos. So:
-	 *
-	 *     total   = area[0]
-	 *     PCs     = area[1 .. total]
-	 *
-	 * Popcounting the area — which is what this tool originally did —
-	 * produces a large, meaningless number that looks like coverage but is
-	 * just the popcount of a list of addresses (656023 for a small probe
-	 * run). The number a fuzzer needs is DISTINCT PCs, so the list is
-	 * sorted and deduplicated; duplicates are expected because the same PC
-	 * is recorded on every execution of an instrumented block.
-	 *
-	 * With a 256 KiB area the list saturates at 32767 entries and area[0]
-	 * stops advancing (`pos < t->kcov_size`), so `total` is also the
-	 * saturation indicator: total == area_words - 1 means coverage was
-	 * TRUNCATED, and any distinct count below that is a lower bound.
-	 */
-	const size_t map_len = area_words * sizeof(unsigned long);
-	unsigned long *area = mmap(NULL, map_len, PROT_READ, MAP_SHARED, fd, 0);
-	if (area == MAP_FAILED) {
-		int e = errno;
-		close(fd);
-		return fail("mmap " KCOV_PATH, e);
-	}
-
-	unsigned long total = area[0];
-	if (total > area_words - 1)
-		total = area_words - 1;   /* defensive: never read past the area */
-
-	unsigned long *pcs = malloc(total * sizeof(unsigned long));
-	if (!pcs) {
-		munmap(area, map_len);
-		close(fd);
-		return fail("malloc", ENOMEM);
-	}
-	for (unsigned long i = 0; i < total; i++)
-		pcs[i] = area[i + 1];
-
-	/* Sort + unique in place to count DISTINCT PCs. */
-	qsort(pcs, total, sizeof(unsigned long), cmp_ulong);
-	unsigned long distinct = 0;
-	for (unsigned long i = 0; i < total; i++)
-		if (i == 0 || pcs[i] != pcs[i - 1])
-			distinct++;
-
-	const int truncated = (area[0] >= area_words - 1);
-
-	printf("KCOV records=%lu distinct_pcs=%lu%s\n",
-	       total, distinct,
-	       truncated ? " TRUNCATED(area full)" : "");
-	if (distinct > 0)
-		printf("KCOV pc_range=0x%lx-0x%lx\n", pcs[0], pcs[distinct - 1]);
-
-	free(pcs);
-	munmap(area, map_len);
-
-	if (ioctl(fd, KCOV_DISABLE, 0) < 0)
-		fprintf(stderr, "warning: KCOV_DISABLE: %s\n", strerror(errno));
-	else
-		printf("KCOV disable ok\n");
-
-	close(fd);
-	/* Propagate the child's status: a coverage run that crashed the
-	 * workload must not look like a clean one. */
-	return code == 0 ? 0 : (code & 0xff);
-}
-KCOV_EOF
-gcc -std=gnu11 -O2 -Wall -Wextra -static \
-    -o "$STAGE/bin/kcov-ctl" "$STAGE/kcov-ctl.c" \
+# kcov-ctl: a real program is required because the KCOV interface is
+# ioctl+mmap only (no read/write), INIT_TRACE takes the area size as the
+# ioctl argument (not a pointer), and the workload must run in the ENABLED
+# TASK since task-mode coverage does not survive fork(). The source lives in
+# qemu/target/kcov-ctl.c next to kbase-probe.c/kbase-negargs.c.
+KCOVCTL_SRC="$REPO_ROOT/qemu/target/kcov-ctl.c"
+[ -f "$KCOVCTL_SRC" ] || die "kcov-ctl source missing: $KCOVCTL_SRC"
+gcc -std=gnu11 -O2 -Wall -Wextra -static -I "$UAPI_INCLUDE" \
+    -DKBASE_PROBE_NO_MAIN \
+    -o "$STAGE/bin/kcov-ctl" "$KCOVCTL_SRC" "$PROBE_SRC" \
     || die "failed to build kcov-ctl"
-rm -f "$STAGE/kcov-ctl.c"
 
 cp "$MODULE" "$STAGE/lib/modules/mali_kbase.ko"
 
@@ -371,22 +195,54 @@ echo "BOOTMARK insmod-rc $INSMOD_RC"
 
 lsmod
 
+# Console quiet window: kernel printks inject themselves between (and INSIDE)
+# the serial console lines the probe and the negargs battery produce -- an early
+# run proved it by letting a ringbuffer dev_err split the "PROBE summary" line,
+# which failed the assertion even though the probe itself had passed. The ring
+# buffer keeps everything; the dmesg dump at the end still prints every kernel
+# message. `dmesg -n 1` only stops console writes during the evidence window.
+dmesg -n 1
+
 # --- coverage -------------------------------------------------------------
-# Enable KCOV, run the probe in a CHILD, then read the parent's remote counter.
-# The fork matters: kcov traces the writing task, and a child it forks reports
-# into the parent's remote area. Running the probe inline and reading afterwards
-# would read counters the probe itself did not fill.
+# KCOV task-mode coverage does NOT survive fork() (kcov_task_init resets the
+# child), so the probe must run IN THE TRACED TASK: kcov-ctl --inline-probe
+# links the probe body and calls it between KCOV_ENABLE and KCOV_DISABLE.
+# Counters are frozen (DISABLE) before counting, then printed.
 echo "BOOTMARK kcov-start"
 if [ -e /sys/kernel/debug/kcov ]; then
     echo "KCOV node present at /sys/kernel/debug/kcov"
     ls -l /sys/kernel/debug/kcov
     # kcov-ctl performs the whole ioctl cycle on ONE fd (state is per-open-file):
-    # INIT_TRACE, ENABLE, fork+exec the probe, read the REMOTE counters, DISABLE.
+    # INIT_TRACE, ENABLE, run the probe IN-PROCESS, DISABLE, count.
     # PROBE_RC stays 0 so verify-boot.sh's probe assertion still works; the
     # workload's real status is reported on the KCOV run line above.
+    # CONTROL EXPERIMENT (F-38; settled the question): count actual executions of the
+    # module's entry points with kprobes while kcov-ctl drives the device, to
+    # prove whether module code runs in the measured path at all.
+    mkdir -p /sys/kernel/tracing
+    T=/sys/kernel/tracing
+    if mount -t tracefs tracefs "$T" 2>/dev/null; then
+        echo > "$T/kprobe_events" 2>/dev/null
+        echo 'p:kp_open kbase_open' >> "$T/kprobe_events" 2>/dev/null
+        echo 'p:kp_read kbase_read' >> "$T/kprobe_events" 2>/dev/null
+        echo 'p:kp_ioctl kbase_ioctl' >> "$T/kprobe_events" 2>/dev/null
+        echo 1 > "$T/events/kprobes/enable" 2>/dev/null
+        echo "BOOTMARK kprobe-armed"
+    fi
     echo "BOOTMARK probe-start"
-    kcov-ctl /bin/kbase-probe
+    kcov-ctl --inline-probe
     KCOV_RC=$?
+    # discriminator: open+read on /dev/mali0 runs kbase_open/kbase_read in
+    # THIS task under tracing -- isolates module coverage from probe machinery
+    kcov-ctl --inline-read /dev/mali0
+    KCOVREAD_RC=$?
+    echo "BOOTMARK kcov-inline-read-rc $KCOVREAD_RC"
+    # windowed control: exactly which PCs a single open()+read() of the
+    # device produces, bucketed vs the running module's text range
+    kcov-ctl --inline-window /dev/mali0 || true
+    if [ -d "$T" ]; then
+        echo "KPROBE hits: open=$(grep -c kp_open $T/trace 2>/dev/null) read=$(grep -c kp_read $T/trace 2>/dev/null) ioctl=$(grep -c kp_ioctl $T/trace 2>/dev/null)"
+    fi
     PROBE_RC=0
     echo "BOOTMARK kcov-ctl-rc $KCOV_RC"
     echo "BOOTMARK probe-rc $PROBE_RC"
@@ -398,6 +254,20 @@ else
     echo "BOOTMARK probe-rc $PROBE_RC"
 fi
 echo "BOOTMARK kcov-end"
+
+# Console interleave: kernel printks can inject INTO the PROBE/NEGARGS summary
+# lines on the serial (an earlier run had the ringbuffer dev_err land between
+# "PROBE summary" and "passed=0x1ff", failing the assertion while the probe
+# itself had passed) -- the quiet window above covers this whole section.
+echo "BOOTMARK negargs-start"
+if [ -x /bin/kbase-negargs ] && [ "$INSMOD_RC" = "0" ]; then
+    kbase-negargs
+    echo "BOOTMARK negargs-rc $?"
+else
+    echo "NEGARGS summary skipped (no binary or insmod failed)"
+fi
+echo "BOOTMARK negargs-end"
+dmesg -n 7
 
 echo "BOOTMARK dmesg-start"
 dmesg | grep -iE 'kbase|mali|gpu' || echo "(no kbase lines)"

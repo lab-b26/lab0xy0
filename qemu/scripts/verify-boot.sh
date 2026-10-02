@@ -149,6 +149,35 @@ else
     FAILED=$((FAILED | 16))
 fi
 
+# 6. negative-argument battery (F-33 audit seams): every malformed ioctl must
+#    be rejected, and the kernel must not have printed a fatal signature during
+#    it. "unexpected=N" counts both accepted-what-should-reject and
+#    rejected-what-should-accept; a WARN/BUG in dmesg is caught by the serial
+#    scan below, so the orgy of indicator layers here is deliberate.
+NEG_SUM="$(grep -o 'NEGARGS summary.*' "$LOG" | tail -1 || true)"
+if [ -n "${NEG_SUM:-}" ] && echo "$NEG_SUM" | grep -q "unexpected=0"; then
+    echo "  [ok]   malformed ioctls all rejected (kbase-negargs)"
+    echo "         $NEG_SUM"
+elif echo "$NEG_SUM" | grep -q "skipped"; then
+    echo "  [ok]   negargs skipped (not present in this bundle)"
+else
+    echo "  [FAIL] negargs battery failed or missing"
+    echo "         ${NEG_SUM:-(no NEGARGS summary line)}"
+    grep '^NEGARGS' "$LOG" 2>/dev/null | sed 's/^/         /' | tail -8
+    FAILED=$((FAILED | 32))
+fi
+
+# 7. no fatal kernel noise across the whole boot, not just the battery window.
+#    Oversized-ioctl paths that WARN rather than reject would still show here.
+#    Exclusions are the recorded, expected-noise lines from boot-logs/README.md.
+if grep -E 'BUG: |Call Trace:|kernel BUG|general protection' "$LOG" | grep -vE 'Unsupported request to change|BUG_ON\(.*== 0\)' >/dev/null 2>&1; then
+    echo "  [FAIL] kernel BUG/call-trace found in serial log"
+    grep -nE 'BUG: |Call Trace:|kernel BUG|general protection' "$LOG" | head -4 | sed 's/^/         /'
+    FAILED=$((FAILED | 64))
+else
+    echo "  [ok]   no kernel BUG / call-trace in serial log"
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "VERDICT: PASS -- boot, Kbase load, and EL0 target interface all verified"

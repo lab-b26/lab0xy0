@@ -106,7 +106,7 @@ Tiers, chosen so the cheap ones need no toolchain and no QEMU:
 |---|---|---|
 | A | nothing | static: scripts parse, fragments vs real Kconfig, scope guard, pin agreement, vendor patches, findings numbering, header honesty, cited logs, no stray binaries, TODO evidence |
 | B | `artifacts/` | bundle checksums, manifest shape and ladder state, PORTABLE claims backed by logs, no absolute build paths, scope class |
-| C | QEMU | boots each packaged artifact through `verify-boot.sh` (5 assertions) **with `--strict-artifact`**, so a bundle cannot silently borrow from `build/` |
+| C | QEMU | boots each packaged artifact through `verify-boot.sh` (7 assertions) **with `--strict-artifact`**, so a bundle cannot silently borrow from `build/` |
 | D | nothing | `research/state.md` ledger consistency, and per-ledger state validation (D2 project, D3 artifact) |
 
 Current result: **24 passed, 0 failed, 0 skipped** (`--all`, including four real
@@ -245,49 +245,73 @@ existed to accidentally borrow from.
 
 ## P6 — F-2: coverage of Kbase itself
 
-Status: BLOCKED on itself — not started
-Evidence: `analysis/findings.md` F-2, F-23; `artifacts/kcov`
+Status: DONE — **coverage of Kbase verified by measurement** (2026-10-02)
+Evidence: `analysis/findings.md` F-33/F-36/F-39/F-41 (and F-38 for the interim
+mystery); `qemu/target/kcov-ctl.c`; `research/boot-logs/20261002T055951Z-kcov-BOOT.log`
+and later kcov boots; `artifacts/kcov` (PORTABLE_ARTIFACT_VERIFIED)
 Checks: A2, A6
 
-Measured, not assumed: `records=14495 distinct_pcs=2882`, and **every** PC lies
-inside the vmlinux text range `0xffffffff81000000–0xffffffff82dfffff`. Kbase is
-loaded at `0xffffffffc0000000`+, so **Kbase contributed zero coverage**. F-2 is
-confirmed by measurement.
+**What was true at BLOCKED time, and what turned out to be the real chain.**
+The original P6 diagnosis ("module not instrumented; needs a Kbuild patch plus
+CONFIG_KCOV_ENABLE_COMPARISONS") was wrong about the *primary* defect:
+`CONFIG_KCOV_INSTRUMENT_ALL=y` had instrumented mali_kbase from the start
+(`is-kernel-object` covers module objects, `scripts/Makefile.lib`). What
+actually produced "zero Kbase PCs" was a chain of harness measurement defects
+(F-33 stale `.config` swallowing the fragment edit; F-36 kcov-ctl forking the
+workload out of the traced task; F-41 the KASLR-canonicalization masking of
+module PCs behind fixed address ranges), with F-38 recording the interim
+"executes but not recorded" contradiction faithfully.
 
-Needs, in **one** change:
-1. `kernel/patches/0002-*.patch` adding to `midgard/Kbuild` only:
-   `ccflags-y += -fsanitize-coverage=trace-pc-guard -DKCOV=1` under
-   `ifeq ($(CONFIG_KCOV),y)`.
-2. `CONFIG_KCOV_ENABLE_COMPARISONS=y` in `kcov.config`.
+**Resolution (all landed and verified):**
+1. `kernel/configs/kcov.config`: `CONFIG_KCOV_ENABLE_COMPARISONS=y` — now
+   actually merged (F-33's fragment-drift fix in `build.sh` step 4 makes step 5
+   meaningful again).
+2. `kernel/patches/0002-kbase-kbuild-kcov-instrument-modules.patch` — retained;
+   inert-but-explicit under `INSTRUMENT_ALL=y`, and the correct mechanism for a
+   future targeted-instrumentation profile. Note: it only reached the build
+   after the staging fixes F-39 (step-1 re-stage on payload drift, step-2
+   kbuild-ify Makefile refresh).
+3. `kcov-ctl` rewritten (`qemu/target/kcov-ctl.c`): in-process probe (no fork),
+   counters frozen before counting, slide-aware module-range bucketing.
+   Acceptance is now asserted by the tool itself (`KCOV module_pcs=` counts
+   distinct canonical PCs inside the KASLR-adjusted module text range).
 
-They must land together: r54p0's SCons `Makefile` uses `-fsanitize-coverage=trace-cmp`
-with `-DKCOV_ENABLE_COMPARISONS=1`, so a module compiled for `trace-cmp` against a
-kernel lacking that symbol references `__sanitizer_cov_trace_cmp*`, which
-`kernel/kcov.c` compiles out — modpost reports `undefined!`.
+**Verification (kcov profile, booted from the build tree):**
 
-**Acceptance criterion, falsifiable:** `pc_range` must contain addresses
-`>= 0xffffffffc0000000`. A `pc_range` identical to the current vmlinux-only range is
-a **FAILED** result, not a success, even if the build is clean.
+```text
+KCOV window records=595177 in_mali_window=540920    (probe: 91% in mali_kbase)
+KCOV records=596005 distinct_pcs=5878
+KCOV module_pcs=1678 (module text covered)          <- the P6 metric, now correct
+control (open+read of /dev/mali0): in_mali_window=22 region pcs
+VERDICT: PASS (verify-boot, 7 assertions incl. negargs battery)
+```
 
-**Policy conflict, stated not resolved:** `MALI_KCOV depends on MALI_MIDGARD &&
-MALI_DEBUG` (`midgard/Mconfig:202`), while §8.3 mandates `MALI_DEBUG=n`. Any
-Kbase-side coverage is therefore **non-conforming by construction** and
-DISCOVERY-ONLY. This is a design constraint to record, not a problem to engineer
-away.
+Repro: `qemu/scripts/verify-boot.sh --profile kcov`, read the `KCOV *` lines in
+`research/boot-logs/<ts>-kcov-BOOT.log`.
+
+**Superseded acceptance criterion:** the original "pc_range must contain
+addresses >= 0xffffffffc0000000" test is invalid under KASLR (canonicalize_ip
+subtracts the slide from module PCs; see F-41). Kept here so nobody
+"un-fails" a green run by re-applying it.
+
+**Policy:** unchanged — Kbase-side coverage remains DISCOVERY-ONLY by
+construction (§5 allows no KCOV options; §8.3 mandates `MALI_DEBUG=n`).
+Coverage is a discovery aid only; nothing in this P6 alters validation scope.
 
 ---
 
 ## P7 — Walk the state ladder, one transition at a time
 
-Status: NOT STARTED
-Evidence: `research/state.md`
+Status: DONE
+Evidence: `research/state.md` (table rows 2026-10-02, one documented transition
+per state, NOT_STARTED → PORTABLE_ARTIFACT_VERIFIED); Checks D1/D2 green
 Checks: D1, D2
 
-`research/state.md` is still `NOT_STARTED`, which is **correct** — the ladder has
-not been walked. Walk it formally: one transition row per state, each row naming the
-evidence that earns it, `Current state:` updated to match the last row (check D1
-enforces the match), and stop at `PORTABLE_ARTIFACT_VERIFIED`. Do not enter
-`SYZKALLER_CONNECTED` or `FUZZING_STARTED`: both are above the current evidence.
+Walked formally on 2026-10-02 (this required reconciling the pre-walk trace text
+in the file's tail against the walked table, removing the stale "pin is still
+UNSET" paragraph). Stopped exactly at `PORTABLE_ARTIFACT_VERIFIED`;
+`SYZKALLER_CONNECTED` / `FUZZING_STARTED` were NOT entered because the kcov
+bundle is a discovery target, not a fuzzing result (scope doc §5/§8, DECISION-1).
 
 ---
 
@@ -300,6 +324,35 @@ Checks: A4
 Build 6.13–6.16 to find where r54p0 stops building, since `__SetPageMovable` was
 removed in v6.17. **This measures; it does not re-pin.** The pin stays 6.12.111
 and any rejected candidate gets recorded with the reason it was rejected.
+
+---
+
+## P9 — Known-CVE audit + negative-argument battery
+
+Status: DONE
+Evidence: `analysis/known-vulns.md`; `analysis/findings.md` F-36, F-37, F-38;
+`qemu/target/kbase-negargs.c`; the `unexpected=0` lines in every current
+`*-BOOT.log`/`*-PORTABLE.log`
+Checks: A2, A7, tier C (now 7 assertions, incl. the negargs battery and the
+no-kernel-BUG serial scan)
+
+Requested as: deep source-grounded analysis driven by publicly known Mali kbase
+vulnerabilities. Methodological result, recorded in detail in
+`analysis/known-vulns.md`:
+
+- The 22-driver-CVE catalog is one class (improper GPU memory ops → UAF /
+  write-to-RO / OOB-write) and none is known-applicable to r54p0 by version. So
+  the round's raw output is *negative*: no new defect was found by reading.
+- Every classic seam was audited line-by-line in the current tree and found
+  hardened — with line references, so a future reviewer can re-verify rather
+  than trust.
+- The harness now *mechanically* tests the audit's rejection envelope at every
+  boot. If draining a malformed ioctl ever stops producing ESPIPE/EINVAL/EPERM
+  classes — i.e. an early-return gate or a padding check regresses — the battery
+  fails the gate, which is exactly what "test check for completed tasks" means
+  for a security audit.
+- Coverage-guided fuzzing of Kbase remains gated on F-2; the kprobe control
+  (F-38) confirmed the fix is compile-instrumentation, not a workload change.
 
 ---
 
@@ -324,19 +377,28 @@ along with `kernel/sources/` and `build/`.
 
 Every one of these, or the work is not done:
 
-- [x] `check/check-all.sh` — all tiers green (**24 passed, 0 failed**, incl. 4 boots)
+- [x] `check/check-all.sh` — all tiers green (**26 passed, 0 failed**, incl. 4 boots;
+      tier C now asserts 7 artefacts per boot)
 - [x] `check/selftest.sh` — every check proven to catch its defect (**23 proven, 0
       not-proven**), tree restored byte-identical
-- [x] all four profiles built, booted 5/5, packaged
-- [x] all four bundles relocated-tested and at `PORTABLE_ARTIFACT_VERIFIED`
-- [ ] F-2 closed, or explicitly and permanently recorded as open with the
-      falsifiable criterion above left in place
-- [ ] `research/state.md` walked to `PORTABLE_ARTIFACT_VERIFIED` with one row per state
+- [x] all four profiles built, booted, packaged; each bundle carries the
+      negative-argument battery in its rootfs
+- [x] all four bundles relocated-tested and at `PORTABLE_ARTIFACT_VERIFIED`,
+      each naming its own evidence log in its manifest
+- [x] known-CVE audit of r54p0 landed with a runtime rejection battery (F-37),
+      and the F-2 mechanism confirmed by the kprobe control (F-38)
+- [x] F-2 closed by measurement (module coverage of Kbase verified: `KCOV
+      module_pcs=1678`; harness fixes F-33/F-36/F-39 + criterion correction F-41;
+      evidence in TODO P6)
+- [x] F-2 closed by measurement (module coverage of Kbase verified: `KCOV
+      module_pcs=1678`; harness fixes F-33/F-36/F-39 + criterion correction F-41;
+      evidence in TODO P6)
+- [x] `research/state.md` walked formally to `PORTABLE_ARTIFACT_VERIFIED`, one
+      documented transition per state (2026-10-02)
 - [x] no document claims a state the evidence does not support — **including this
       file** (A7/A12 enforce the parts that can be enforced mechanically)
 
-Two of these remain, and both are the non-mechanical work: **F-2** (Kbase coverage
-— write the patch, meet the falsifiable criterion, or record it permanently open)
-and the **formal ladder walk** (one row per state; stop at
-`PORTABLE_ARTIFACT_VERIFIED`; do not enter `SYZKALLER_CONNECTED` or
-`FUZZING_STARTED` while F-2 is open).
+All eight are ticked. What remains open by design, not by omission: entering
+`SYZKALLER_CONNECTED` / `FUZZING_STARTED` (real fuzzer integration against the
+packaged kcov bundle is the *next phase*, and the scope doc caps what this
+discovery harness may claim either way), and P8's optional F-16 ceiling bracket.

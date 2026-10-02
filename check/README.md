@@ -37,7 +37,14 @@ Cheap tiers need no toolchain and no QEMU, so they can run on every change.
 |---|---|---|
 | **A** | nothing | A1 scripts parse · A2 fragment symbols vs the real Kconfig · A3 §8.3 scope guard · A4 kernel pin vs the tree · A5 vendor patches byte-identical · A6 findings numbered contiguously · A7 header/count/status claims vs the filesystem · A8 cited boot logs exist and show real passes · A9 no build tree committed · A10 no orphan binary · A11 `INERT` annotations are truthful · A12 TODO `DONE` items cite real evidence |
 | **B** | `artifacts/` | B1 `SHA256SUMS` · B2 manifest shape **and ladder state** · B3 `PORTABLE` claim backed by a clean-location log · B4 no absolute `build/` path · B5 scope class `DISCOVERY-ONLY` |
-| **C** | QEMU | C1 each packaged artifact passes all five boot assertions **with `--strict-artifact`** |
+| **C** | QEMU | C1 each packaged artifact passes all **seven** boot assertions **with `--strict-artifact`** |
+
+Assertions #6 and #7 are the security-audit seam, not generic health checks:
+#6 requires the `kbase-negargs` battery (malformed-ioctl rejection, `unexpected=0`;
+skips cleanly on rootfs images that predate it), and #7 fails the boot if any
+`BUG:`/`Call Trace:` appeared anywhere in the serial log. The dmesg-quiet window
+in `/init` exists because a kernel printk interleaved into the `PROBE summary`
+line once produced a corrupt-line false failure (recorded in F-37's write-up).
 | **D** | nothing | D1 `state.md` current state matches its last transition row · D2 project ladder moves one way only · D3 bundle state is on the *artifact* ladder, never a project-ladder state |
 
 ```sh

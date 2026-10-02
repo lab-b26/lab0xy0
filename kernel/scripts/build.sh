@@ -140,7 +140,14 @@ STAGE_MARK="$KERNEL_SRC/.kbase-staged"
 #              take effect                                    -> a `depends on`
 #              clause is unsatisfied, or a `choice` picked a sibling
 kconfig_symbol_kind() {
-    awk -v sym="$1" '
+    # $1 carries the CONFIG_ prefix (fragment lines are CONFIG_X=...), but
+    # Kconfig entries are written WITHOUT it ("config KCOV..."). Searching for
+    # "config CONFIG_X" never matches, which made every lookup fall through to
+    # "absent" -- a wrong diagnosis only visible on the MISSING path, which is
+    # why F-24's three-way classification appeared to work (selftest asserted
+    # the red outcome, never the classification string). Strip the prefix.
+    local bare="${1#CONFIG_}"
+    awk -v sym="$bare" '
         BEGIN { result = "absent"; inf = 0 }
         $0 == "config " sym || $0 == "menuconfig " sym { inf = 1; result = "invisible"; next }
         inf && (/^(menu)?config / || /^choice$/ || /^endchoice$/ || /^endmenu$/) { inf = 0 }
@@ -172,23 +179,35 @@ explain_missing() {
 # --- 1. stage the Kbase payload -------------------------------------------
 note "1/8  staging the Kbase payload into the kernel tree"
 
-if [ -f "$STAGE_MARK" ] && [ "$RESTAGE" -eq 0 ]; then
-    log "already staged (marker: $(basename "$STAGE_MARK")); use --restage to redo"
+# F-37: the marker alone is not proof the tree matches the payload. The marker
+# is written once and never refreshed on payload change, so research patches
+# added to work/kbase-patched/ later (e.g. kernel/patches/0002-*) were silently
+# NOT part of subsequent builds until the tree was reset by hand. Compare the
+# recorded payload fingerprint against the live payload and re-stage on drift.
+KBASE_PAYLOAD_FP=$(find "$KBASE_TREE" -type f -printf '%P\n' | sort \
+                   | while read -r f; do sha256sum "$KBASE_TREE/$f"; done | sha256sum | awk '{print $1}')
+STAGED_FP=""
+[ -f "$STAGE_MARK" ] && STAGED_FP=$(awk -F= '/^payload=/{print $2}' "$STAGE_MARK")
+
+if [ -f "$STAGE_MARK" ] && [ "$RESTAGE" -eq 0 ] && [ -n "$STAGED_FP" ] && [ "$STAGED_FP" = "$KBASE_PAYLOAD_FP" ]; then
+    log "already staged (marker: $(basename "$STAGE_MARK")); payload unchanged"
 else
-    [ -f "$KERNEL_SRC/drivers/gpu/arm/midgard/Kbuild" ] && \
-        die "a Kbase tree is already present at $KERNEL_SRC/drivers/gpu/arm but the
-       staging marker is missing. The tree is in an unknown state. Reset it with:
-         rm -rf '$KERNEL_SRC' && kernel/scripts/fetch-kernel.sh"
+    if [ -f "$STAGE_MARK" ]; then
+        log "payload drifted since staging (F-37): recorded ${STAGED_FP:-none}, current $KBASE_PAYLOAD_FP"
+        log "re-staging over the existing tree (additive overlay; removed payload files would linger)"
+    else
+        [ -f "$KERNEL_SRC/drivers/gpu/arm/midgard/Kbuild" ] && \
+            die "a Kbase tree is already present at $KERNEL_SRC/drivers/gpu/arm but the
+           staging marker is missing. The tree is in an unknown state. Reset it with:
+             rm -rf '$KERNEL_SRC' && kernel/scripts/fetch-kernel.sh"
+    fi
     log "merging payload root into kernel tree root"
     cp -a "$KBASE_TREE/." "$KERNEL_SRC/"
     [ -d "$KERNEL_SRC/drivers/gpu/arm/midgard" ] \
         || die "staging did not produce drivers/gpu/arm/midgard — payload layout changed?"
-    # Fingerprint the payload so a changed Kbase is detected on a later build.
-    PAYLOAD_FP=$(find "$KBASE_TREE" -type f -printf '%P\n' | sort \
-                 | while read -r f; do sha256sum "$KBASE_TREE/$f"; done | sha256sum | awk '{print $1}')
-    printf 'payload=%s\nstaged_at=%s\n' "$PAYLOAD_FP" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    printf 'payload=%s\nstaged_at=%s\n' "$KBASE_PAYLOAD_FP" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         > "$STAGE_MARK"
-    log "staged (payload fingerprint $PAYLOAD_FP)"
+    log "staged (payload fingerprint $KBASE_PAYLOAD_FP)"
 fi
 
 # --- 2. kbuild-ify: Makefile shadows Kbuild -------------------------------
@@ -202,7 +221,16 @@ for d in drivers/gpu/arm drivers/gpu/arm/midgard; do
         cp -a "$dir/Kbuild" "$dir/Makefile"
         log "$d/Makefile: Android Makefile set aside, Kbuild installed in its place"
     elif [ -f "$dir/Makefile.android-orig" ]; then
-        log "$d: already kbuild-ified"
+        # The kbuild-ified Makefile is a COPY of Kbuild made once; after a
+        # payload re-stage (F-37) Kbuild may be newer, and nothing rebuilds the
+        # copy -- so a Kbase-side Kbuild change (e.g. kernel/patches/0002-*)
+        # would never reach the compiler. Refresh the copy on every build.
+        if ! cmp -s "$dir/Kbuild" "$dir/Makefile"; then
+            cp -a "$dir/Kbuild" "$dir/Makefile"
+            log "$d/Makefile: refreshed from newly staged Kbuild"
+        else
+            log "$d: already kbuild-ified"
+        fi
     elif [ -f "$dir/Makefile" ] && [ ! -f "$dir/Kbuild" ]; then
         log "$d: only a Makefile present, left as-is"
     else
@@ -232,8 +260,29 @@ note "4/8  seeding $OUT/.config (kernel defconfig + profile fragment)"
 FRAG="$REPO_ROOT/kernel/configs/$PROFILE.config"
 [ -f "$FRAG" ] || die "config fragment missing: $FRAG"
 
+# A reused .config must still encode the CURRENT fragment: step 4 only merges
+# on a fresh tree, so editing the fragment alone previously had NO effect on
+# the next build, and step 5 then failed with a stale .config that predates
+# the edit (hit live by the KCOV P6 change). build-metadata.txt already
+# records the fragment sha256, so compare it and force a re-merge on drift.
+# Unknown provenance (no metadata) is treated as drift, which is safe: the
+# merge below is deterministic given the same inputs.
 if [ -f "$OUT/.config" ]; then
-    log "reusing existing $OUT/.config (delete $OUT to reconfigure)"
+    _frag_now=$(sha256sum "$FRAG" | awk '{print $1}')
+    _frag_was=$(awk -F= '/^fragment_sha256=/{print $2}' "$OUT/build-metadata.txt" 2>/dev/null)
+    if [ -n "$_frag_was" ] && [ "$_frag_now" = "$_frag_was" ]; then
+        log "reusing existing $OUT/.config (fragment unchanged)"
+    else
+        log "fragment changed since the cached .config was merged"
+        log "  (metadata fragment: ${_frag_was:-none-recorded}, current: $_frag_now)"
+        log "  re-merging: rm $OUT/.config -- config-only rebuild; objects unaffected"
+        log "  by symbol changes are still reused by kbuild below"
+        rm -f "$OUT/.config"
+    fi
+fi
+
+if [ -f "$OUT/.config" ]; then
+    : # merged above or fresh merge below
 else
     ( cd "$KERNEL_SRC" && make O="$OUT" defconfig ) >>"$LOG" 2>&1 \
         || die "defconfig failed — see $LOG"
@@ -351,11 +400,11 @@ if [ "$failed" -ne 0 ]; then
        kernel without Kbase.
        Common causes:
          - Kbase was not staged into the kernel tree (check step 1/2 above)
-         - the symbol is a derived, prompt-less symbol: set the `select`ing
+         - the symbol is a derived, prompt-less symbol: set the selecting
            symbol (usually a choice member) instead -- see F-24
          - a Kconfig 'depends on' clause is unsatisfied (e.g. MALI_EXPERT must be y
            before MALI_NO_MALI / LARGE_PAGE_SUPPORT are selectable)
-         - a `choice` selected a different member than the fragment names
+         - a choice selected a different member than the fragment names
        See analysis/findings.md."
 fi
 CONFIG_SHA=$(sha256sum "$OUT/.config" | awk '{print $1}')

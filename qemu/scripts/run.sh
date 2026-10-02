@@ -138,15 +138,19 @@ Build it first:  kernel/scripts/build.sh --profile $PROFILE"
 # would not be self-contained, which is the whole point of packaging one
 # (see ../../artifacts/README.md). Same candidate order as the kernel: artifact
 # first, build tree only as a pre-packaging fallback.
-ROOTFS=$(resolve_from_artifact "rootfs" \
-    "$BUILD_ROOT/rootfs/rootfs-$PROFILE.cpio.gz" \
-    "$ARTIFACT/rootfs/rootfs-$PROFILE.cpio.gz" \
-    "$ARTIFACT/rootfs/rootfs.cpio.gz") || die "no rootfs for profile '$PROFILE'.
+# An explicit --rootfs wins over all resolution (F-38: it used to be
+# overwritten unconditionally here, silently ignoring the user's flag).
+if [ -z "$ROOTFS" ]; then
+    ROOTFS=$(resolve_from_artifact "rootfs" \
+        "$BUILD_ROOT/rootfs/rootfs-$PROFILE.cpio.gz" \
+        "$ARTIFACT/rootfs/rootfs-$PROFILE.cpio.gz" \
+        "$ARTIFACT/rootfs/rootfs.cpio.gz") || die "no rootfs for profile '$PROFILE'.
 Looked in:
   $ARTIFACT/rootfs/rootfs-$PROFILE.cpio.gz
   $ARTIFACT/rootfs/rootfs.cpio.gz
   $BUILD_ROOT/rootfs/rootfs-$PROFILE.cpio.gz
 Build it first:  qemu/rootfs/build-rootfs.sh --profile $PROFILE"
+fi
 
 # Report what was actually used, so the log records which tree answered. Silence
 # here would let a fallback boot masquerade as an artifact boot -- the reviewer

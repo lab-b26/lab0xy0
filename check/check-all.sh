@@ -728,9 +728,9 @@ for a in $_artifacts; do
     fi
     if qemu/scripts/verify-boot.sh --profile "$_p" --artifact "$a" \
          --strict-artifact --log "/tmp/check-all-$_p.log" >/dev/null 2>&1; then
-        ok "C1  $_p boots (5 assertions)" ""
+        ok "C1  $_p boots (7 assertions)" ""
     else
-        bad "C1  $_p boots (5 assertions)" "verify-boot.sh failed; see /tmp/check-all-$_p.log"
+        bad "C1  $_p boots (7 assertions)" "verify-boot.sh failed; see /tmp/check-all-$_p.log"
     fi
 done
 printf '\n'

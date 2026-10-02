@@ -1580,7 +1580,372 @@ maintained is to write the result you *expect*. Every other fragment in
 `check/check-all.sh` check **A7** now compares header claims against the filesystem
 so the drift is caught mechanically rather than by good intentions.
 
-## Consolidated unknowns
+## F-33 — VERIFIED: `build.sh` silently ignored fragment edits by reusing a stale `.config`
+
+**Status: VERIFIED (hit live, root-caused, fixed).** Category: `build tooling`.
+Same family as F-13/F-14/F-15: a defect in this repository's own tooling, found
+only by executing it against a real change.
+
+While closing F-2 (TODO P6) I added `CONFIG_KCOV_ENABLE_COMPARISONS=y` to
+`kernel/configs/kcov.config` and re-ran `build.sh --profile kcov`. Step 5/8
+reported the symbol `MISSING` — yet the symbol demonstrably exists at
+`lib/Kconfig.debug:2124` with `depends on KCOV` and a working `cc-option` probe
+(both verified directly), and the merged `.config` actively reverted the symbol
+to `# CONFIG_KCOV_ENABLE_COMPARISONS is not set`.
+
+Root cause: step 4/8 seeds `$OUT/.config` from defconfig + fragment **only when
+no `.config` exists**:
+
+```text
+if [ -f "$OUT/.config" ]; then
+    log "reusing existing $OUT/.config (delete $OUT to reconfigure)"
+```
+
+The kcov tree was being rebuilt after a fragment edit, so the cached `.config`
+from the **pre-edit** run was reused and the new symbol never entered the merge.
+A build script whose headline purpose is "the config is what the fragment says"
+had a path on which the config was what the fragment *used to* say, and the only
+sign of it was a step-5 failure with a misleading message (see F-34/F-35).
+
+Proof it was staleness and not a Kconfig problem: `scripts/config --enable
+KCOV_ENABLE_COMPARISONS build/kcov/.config && make olddefconfig` produced
+`CONFIG_KCOV_ENABLE_COMPARISONS=y` and kept it — deps satisfied, `cc-option`
+probe succeeding, same tree, same compiler.
+
+Fix (minimal, in-tree, no config change): step 4 now compares the fragment's
+sha256 against the `fragment_sha256=` already recorded in
+`$OUT/build-metadata.txt` by step 8/8. Drift (or absent metadata, i.e. unknown
+provenance) deletes the stale `.config` and re-merges deterministically; an
+exact match keeps the fast path. Kbuild then rebuilds only what the changed
+symbols actually affect. Falsifiable check: edit any fragment without touching
+the tree and rebuild — the fragmentation drift line now appears in the log and
+the new symbol lands.
+
+## F-34 — VERIFIED: `kconfig_symbol_kind` in `build.sh` always answered "absent"
+
+**Status: VERIFIED (root-caused during F-33, fixed).** Category: `build tooling`.
+
+The step-5 helper classifies a missing symbol as `absent` / `invisible` /
+`settable` (the remedy the reader gets depends on it — F-24's fix). It never
+worked: the function receives `CONFIG_KCOV_ENABLE_COMPARISONS` **with** the
+`CONFIG_` prefix and searches Kconfig files for a line equal to
+`config CONFIG_KCOV_ENABLE_COMPARISONS`, which never matches — Kconfig entries
+are unprefixed (`config KCOV_ENABLE_COMPARISONS`). Every call therefore fell
+through to `absent`, printing the remedy "not present in the pinned kernel
+Kconfig at all -> wrong kernel version?", which is actively misleading for a
+symbol that both exists and is settable.
+
+It survived because the classification only runs on the failure path, and the
+selftest asserted that the step goes red — never the *classification string* on
+its lips. F-24's "unsatisfiable symbol" worked for the same reason the message
+was wrong: outcome correct, explanation wrong. Demonstrated directly:
+
+```text
+awk(…, sym="CONFIG_KCOV_ENABLE_COMPARISONS", lib/Kconfig.debug) -> absent
+awk(…, sym="KCOV_ENABLE_COMPARISONS",        lib/Kconfig.debug) -> settable
+```
+
+Fix: strip the prefix at function entry (`bare="${1#CONFIG_}"`). One-line
+change; behaviour on success paths unchanged.
+
+## F-38 — VERIFIED: kprobes prove the module executes during the probe; KCOV *still* records nothing for it
+
+**Status: VERIFIED (control experiment, recorded after the fact; referenced by the
+rootfs init before this entry existed).** Category: `measurement / coverage`.
+**RESOLVED 2026-10-02 by F-41: KCOV *was* recording module PCs; the counter's
+fixed-address windows (raw `0xffffffffc0000000+` / un-compacted dedup) hid them
+under KASLR canonicalization. The "still nothing" state described below is the
+intermediate run before the harness fixes landed.**
+
+F-2/F-23 showed `records=14495 distinct_pcs=2882`, every PC inside vmlinux text,
+none in the module. That could have meant two very different things: "the module
+never runs in this workload" (in which case F-2 is a workload problem) or "the
+module runs but is not instrumented" (in which case F-2 is a build-integration
+problem). The fix path differs materially, so the distinction was worth a control
+experiment. `build-rootfs.sh`'s init now arms three kprobes (`kbase_open,
+kbase_read, `kbase_ioctl`) on the module's entry points before the coverage run,
+and counts their hits from tracefs afterwards.
+
+On the kcov profile (`20261002T042827Z`-era boot, exact numbers from
+`vb3-kcov.log` written by this round's battery run):
+
+```text
+KPROBE hits: open=3 read=2 ioctl=6
+```
+
+so the module *does* execute in the traced path — the ioctl dispatch is entered
+six times under tracing — **while** the same run's KCOV `pc_range` stayed inside
+vmlinux. **At the time of measurement, two readings competed:** "module executes
+but is not instrumented" (→ build fix: `KCOV_INSTRUMENT=y` in a research patch vs
+`INSTRUMENT_ALL=y`), versus "module executes but the harness counted wrongly."
+F-41 resolved it: instrumentation existed; a chain of harness measurement defects
+saw nothing. This entry is retained as the faithful record of the intermediate
+measurement state ("executes but not recorded"), and its fix-recommendation is
+superseded by F-41.
+
+## F-37 — VERIFIED (as an audit): the classic kbase CVE classes are hardened in r54p0-01eac0's source; no new defect found by reading
+
+**Status: VERIFIED audit result — a *negative* result, stated plainly so it is
+not later re-spun as more than it is.** Category: `security research`.
+
+Trigger: the user's request for a deep, source-grounded Mali audit against known
+CVE techniques. Method and evidence are mapped in detail in
+`research/../analysis/known-vulns.md`; the summary:
+
+- The public CVE catalogue (NVD, 22 driver CVEs, 2019-2024) is dominated by one
+  class — improper GPU *memory processing* → UAF / write-to-read-only /
+  limited-OOB-write — and every listed fix version is `r47p0` or earlier.
+  **`r54p0-01eac0` is downstream of all of them.** NUL.
+- Line-level audit of the recorded fault seams in the current tree: alias
+  (`mali_kbase_mem_linux.c:1719+`), flags change (919-1116, prot-mask
+  restriction makes the write-to-RO family structurally unreachable from this
+  ioctl), JIT commit (2126+), CSF tiler heap (refcount-paired, generation-
+  checked), KCPU fence paths (fd_install-last, overflow-safe object counts),
+  legacy `READ_USER_PAGE` (neutered to a single register), the ioctl macro layer
+  (`BUILD_BUG_ON` + stack-copy + padding checks), and `kbase_vmap_phy_pages`
+  (wrap-checked). No candidate defect was found that survives contact with the
+  validation code; candidates that remain (queue-group deep validation, HWCNT
+  reader fd, tlstream ring, memory group manager) are recorded in the map as
+  F-2-blocked (need coverage), not as vulnerabilities.
+- Runtime: `qemu/target/kbase-negargs.c` now runs on every profile boot
+  (assertion #6) verifying the rejection envelope matches the audit's reading —
+  19 cases, all rejected, `unexpected=0`, on all four bundles
+  (`*-PORTABLE.log`). This is a *validation that the rejected paths reject*, not
+  proof that no exploitable path exists.
+
+**Scope warning, load-bearing:** MALI_NO_MALI cannot produce GPU faults, COW, or
+soft-stops — the paths where the in-the-wild kbase CVEs actually trigger. Nothing
+in this repository can demonstrate (or rule out) exploitability on real
+hardware, and any future finding here is a *research observation*, not an Arm
+vulnerability report. See DECISION-1 and program-scope SS8.2/SS8.4.
+
+**Also recorded as part of the same round:** the serial console interleave
+defect — a kernel printk landed inside the probe's own summary line and failed a
+passing run (observed on `043610Z-kasan-PORTABLE.log`). Fixed by quietening the
+console (`dmesg -n 1`) exactly around the evidence-producing window
+(probe + negargs), with the full ring still dumped at the end. Any future "missing
+passed=0x1ff" read of a log must check for an interleaved printk before trusting
+it.
+
+## F-35 — VERIFIED: step-5 failure message in `build.sh` executed its own prose
+
+**Status: VERIFIED (observed in the F-33 build log, fixed).** Category: `build
+tooling`.
+
+The `die` message at the end of step 5 is a double-quoted string containing
+markdown backticks: `` `select`ing `` and `` `choice` ``. Inside double quotes,
+backticks are **command substitution**. When step 5 failed for F-33, bash tried
+to execute the words; the log shows
+
+```text
+./kernel/scripts/build.sh: command substitution: line 359: syntax error near
+    unexpected token `newline'
+./kernel/scripts/build.sh: command substitution: line 359: `select'
+./kernel/scripts/build.sh: line 359: choice: command not found
+```
+
+i.e. the diagnostic that exists to explain a failure was itself corrupt — and
+had `select`/`choice` been binary-resolvable words, it would have run *them*.
+The exit status survived, so the failure was still terminal; but a failure
+report that fires arbitrary words against `$PATH` is not a diagnostic, it is a
+loaded gun pointed at the error path.
+
+Fix: the backticks are now plain words. No behaviour change on success paths;
+the failure path now prints what it was written to print.
+
+All three (F-33/F-34/F-35) were invisible while builds succeeded and all three
+were found by one legitimate build failure — the strongest argument so far for
+this repository's habit of reading its own logs instead of trusting its exit
+codes.
+
+## F-36 — VERIFIED: KCOV task-mode tracing does not survive `fork()` — `kcov-ctl` never traced the probe
+
+**Status: VERIFIED (root-caused against the kernel source, then confirmed by
+measurement before/after the fix).** Category: `harness tooling`. This finding
+**partially re-opens F-23's interpretation**: the "coverage works, Kbase
+contributes zero" conclusion rested on a run in which **nothing the probe did
+was traced at all**.
+
+### What the kcov-ctl in `qemu/rootfs/build-rootfs.sh` used to do
+
+1. `KCOV_INIT_TRACE` + `KCOV_ENABLE` on the kcov-ctl task;
+2. **`fork()`** and `execvp()` the workload in the child;
+3. read the parent's area afterwards.
+
+### Why that cannot work — VERIFIED against the kernel
+
+`kernel/fork.c:1185` (copy_process) calls `kcov_task_init(tsk)`, which calls
+`kcov_task_reset()` (`kernel/kcov.c:376`), which writes
+`t->kcov_mode = KCOV_MODE_DISABLED` and clears `t->kcov_area`. KCOV has no
+"inherit coverage into children" path for task mode (the REMOTE handle passed
+down is only consumed by in-kernel subsystems that wrap code in
+`kcov_remote_start/stop`; a fuzzed workload is not covered by that).
+
+So the child running `kbase-probe` was **never traced**. The 2,882 distinct PCs
+F-23 recorded were the *parent's own* fork/exec/waitpid lifecycle noise in
+vmlinux — conclusive on the narrow point F-23 claimed (no module-range PCs),
+but for the wrong reason: the experiment could not have seen module coverage
+even if it had existed.
+
+### Fix (applied here)
+
+The workload now runs **in the enabled task** (`kcov-ctl --inline-probe` calls
+`kbase_probe_run()` directly; this is also how syz-executor drives kcov, one
+enable per executor thread). Additionally:
+
+- counters are **frozen** (`KCOV_DISABLE`) before parsing — the first
+  in-process run counted a live, still-appending area and printed a spurious
+  `TRUNCATED` flag;
+- the trace area grew 256 KiB → 8 MiB (a real traced probe generates ~766k
+  records; the old area would have truncated silently);
+- `kcov-ctl` moved from a heredoc in `build-rootfs.sh` to
+  `qemu/target/kcov-ctl.c` and now prints the P6 acceptance metric directly
+  (`KCOV module_pcs=`, plus per-region buckets and the running module's text
+  range from `/proc/kallsyms`), and gains a `--inline-window` mode that
+  isolates exactly which PCs a single `open()`+`read()` generated.
+
+### Independent measurements establishing the bug
+
+```text
+fork-mode (old tool):    records=14328  distinct=2799  (all vmlinux)
+inline mode (fixed tool): records=766700 distinct=~5400 (50x more records --
+                         the probe's real syscall path, now actually traced)
+```
+
+The fork bug fully explains F-23's absolute numbers. What it does **not** yet
+explain is the still-zero module coverage after the fix — that is the separate
+open question tracked in the P6 work log below.
+
+## F-39 — VERIFIED: `build.sh` never re-staged a drifted payload, and kbuild-ify never refreshed its Makefile copy
+
+**Status: VERIFIED (found live while closing TODO P6; fixed in `build.sh`
+steps 1–2).** Category: `build tooling`. Same class as F-33, one step earlier
+in the pipeline.
+
+Two layers of build-time staleness combined to make `kernel/patches/0002-*`
+**not part of any build**, while every log suggested otherwise:
+
+1. **Payload staging is one-shot.** Step 1 skipped staging whenever the marker
+   `$KERNEL_SRC/.kbase-staged` existed, without comparing payload content.
+   `apply-patches.sh` had rebuilt `work/kbase-patched/` with the new research
+   patch; the kernel tree silently still held the older payload. The build
+   then proceeded against a payload different from what
+   `apply-patches.sh` had just printed as applied.
+
+2. **kbuild-ify is one-shot.** Step 2 copies `midgard/Kbuild` over the Android
+   `Makefile` only when `Makefile.android-orig` does not yet exist. After a
+   re-stage this copy kept serving the OLD `Kbuild` — so even with staging
+   refreshed, the Kbuild change would not have reached the compiler.
+
+Fixes: step 1 now fingerprints the payload on every build (`build-metadata.txt`
+already recorded `payload=`; it was informational only) and re-stages on
+drift; step 2 refreshes `Makefile` from `Kbuild` whenever they differ. Both
+are log-noisy about refreshes so a stale tree can no longer pass unnoticed.
+
+Severity: moderate tooling defect — no wrong kernel ever shipped in a bundle
+(the failing path was step-5 fragment verification catching the config half),
+but research patches could have gone unbuilt forever if not measured.
+
+## F-40 — VERIFIED: `run.sh --rootfs` was parsed and then overwritten
+
+**Status: VERIFIED (live): a control-experiment boot silently ran the wrong
+rootfs.** Category: `harness tooling`.
+
+`run.sh` parsed `--rootfs FILE` into `$ROOTFS`, then unconditionally overwrote
+the variable in the artifact-resolution block below it. A caller pointing at an
+out-of-band rootfs got the artifact's instead — verified when a control-experiment
+image was passed and the guest still ran the stock init. The flag is also what
+a fuzzing campaign uses to swap in a modified rootfs without touching bundles.
+
+Fix: the resolution block runs only when `--rootfs` was not given. The
+documented candidate order is unchanged.
+
+## F-41 — VERIFIED: Kbase module coverage existed all along; F-23/P6's "vmlinux-only" verdict was a KASLR-canonicalization artifact of the harness
+
+**Status: VERIFIED by direct measurement after fixing the harness (see
+below).** This finding **closes F-2's feared consequence**, **supersedes
+F-23's interpretation**, and **resolves the F-38 intermediate mystery** — and
+redefines how coverage of a loadable module must be measured on a
+KASLR-enabled kernel. It also closes TODO P6.
+
+### What is actually true (VERIFIED this session)
+
+`CONFIG_KCOV_INSTRUMENT_ALL=y` **does** instrument loadable modules:
+`scripts/Makefile.lib:175` applies `CFLAGS_KCOV` when
+`config_or_module_instrument`… i.e. `$(KCOV_INSTRUMENT_*…)$(KCOV_INSTRUMENT)`
+or `$(is-kernel-object) && CONFIG_KCOV_INSTRUMENT_ALL`, and
+`is-kernel-object = $(or $(part-of-builtin),$(part-of-module))`
+(`scripts/Makefile.lib:204`). mali_kbase.ko therefore carried sancov
+instrumentation (~25k callback sites incl. `kbase_open`/`kbase_ioctl` entries)
+in every kcov-profile build, old and new.
+
+### Why every measurement said zero
+
+Chain of three harness defects, each of which alone makes "module coverage"
+unobservable while producing a plausible-looking number:
+
+1. **F-33**: the fragment symbol was never merged (stale `.config` reuse), so
+   the accepted for the new build… fixed.
+2. **F-36**: kcov task-mode coverage does not survive `fork()`
+   (`kernel/fork.c:1185` → `kcov_task_init`); the old `kcov-ctl` forked the
+   probe after `KCOV_ENABLE`, so the probe was never traced. The 2,882 "vmlinux"
+   PCs were the *parent's own* lifecycle noise. (This is the entire content of
+   F-23's number; its Kbase-zero conclusion stays correct but for the wrong
+   reason — the experiment could not have seen module coverage, period.)
+3. **Canonicalization masking (new here):** `kernel/kcov.c` canonicalizes every
+   recorded PC by subtracting `kaslr_offset()`. vmlinux canonical PCs always
+   land at the link base (`0xffffffff81000000+`), but **module** PCs land at
+   `module_base - slide`. With the observed slide (~0x10–0x1a MB×16, e.g.
+   `0x18400000`) module text at raw `0xffffffffc018a000` canonicalizes to
+   `0xffffffffa7d80000` — far below the `>= 0xffffffffc0000000` criterion that
+   F-23 and TODO P6 prescribed, and even below the fixed "module region" of
+   `0xffffffffa0000000` used by early variants of the counter. The "all PCs are
+   vmlinux" verdict was an artifact of comparing canonical PCs against raw
+   fixed ranges.
+
+### The measurement that settles it
+
+With `qemu/target/kcov-ctl.c` (in-process probe, counters frozen before
+counting, slide computed from `/proc/kallsyms` `_text`, module range mapped
+through it):
+
+```text
+guest: kcov profile, 6.12.111, CONFIG_KCOV=y + INSTRUMENT_ALL=y
+      + CONFIG_KCOV_ENABLE_COMPARISONS=y  (fragment now actually merged, F-33 fix)
+KCOV window records=595177 in_mali_window=540920      <- probe: 91% of traced
+                                                        execution is mali_kbase
+KCOV records=596005 distinct_pcs=5878
+KCOV module_pcs=1678 (module text covered)            <- P6 acceptance: MET
+control: kcovtest.ko open+read -> in_mali_window=22   <- generic module coverage
+                                                        path verified too
+control module calling __sanitizer_cov_trace_pc directly raised the area
+counter (KTDIRECT before=1355 after=1357) — callback reachability proven.
+
+P6 acceptance restated and enforced in the tool: module coverage is present
+iff the count of distinct canonical PCs inside the KASLR-adjusted module text
+range is > 0. Fixed absolute ranges are INVALID without the slide correction.
+Evidence: research/boot-logs/20261002T055951Z-kcov-BOOT.log and later.
+```
+
+### Consequences
+
+- **P6 is closed.** The kcov artifact is a real coverage-guided fuzzing target
+  for Kbase: ~1.7k distinct PCs in the module from a 9-phase probe alone.
+- Patch `kernel/patches/0002-*` (`KCOV_INSTRUMENT := y`) is *retained* — it is
+  inert-but-explicit under `INSTRUMENT_ALL=y` (single flag set, no dup) and is
+  the correct mechanism should a future profile want module coverage with
+  `INSTRUMENT_ALL=n` (targeted instrumentation). It only started reaching
+  builds after the F-39 fixes; both behaviors (with/without the patch staged)
+  show identical coverage, proving compatibility.
+- The Arm-conformance statement is unchanged: coverage tooling is
+  DISCOVERY-ONLY (§5 doesn't allowlist KCOV variants), and §8.3's
+  `MALI_DEBUG=n` stays. The old F-2/F-23 policy worry ("KCOV-for-Kbase is
+  non-conforming by construction") was always about discovery anyway; nothing
+  in this finding changes scope.
+- A coverage tool that prints confident, wrong numbers (this happened three
+  times in one day: fork trap, raw-range criterion, and a dedup-prefix bug in
+  the interim counter) is the most dangerous instrument in the lab. All three
+  are now mechanical, self-checking parts of `kcov-ctl` itself.
 
 1. ~~Whether r54p0 + all six patches compiles on any x86_64 Linux kernel.~~
    **VERIFIED YES for 6.12.111** (F-18), and **VERIFIED NO for 6.17+** (F-16).

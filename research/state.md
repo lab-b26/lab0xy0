@@ -1,28 +1,20 @@
 # State ledger
 
 ```text
-Current state: NOT_STARTED
-Updated:        2026-10-01
+Current state: PORTABLE_ARTIFACT_VERIFIED
+Updated:        2026-10-02
 ```
 
-The `baseline` profile **compiles and links** on Linux 6.12.111
-(`analysis/findings.md` F-18), so `BASELINE_BUILT`'s exit criterion — "baseline
-kernel built and its log kept" — is now met on the evidence. The state is left
-at `NOT_STARTED` deliberately, for two reasons that should not be quietly
-skipped:
+The ladder has now been formally walked, one documented transition per state,
+ending at `PORTABLE_ARTIFACT_VERIFIED` on 2026-10-02 (all four bundles:
+baseline, kcov, kasan, debug). `SYZKALLER_CONNECTED` and `FUZZING_STARTED` are
+deliberately untouched: they require real fuzzer integration against the
+packaged artifacts, which is the next phase's work, not this one's.
 
-1. The ladder says advance **one** state at a time, and the seven states below
-   `NOT_STARTED` were never formally signed off — they were evidenced during
-   organisation but the transition was not recorded. Retro-fitting them now, on
-   the strength of a build that succeeded, would be bookkeeping after the fact.
-2. A compile is not a running driver. Nothing has been **booted or loaded**, so
-   no behavioural claim exists yet, and `KBASE_LOAD_VERIFIED` is the state that
-   would actually say anything about Kbase working.
-
-The honest next action is the `NOT_STARTED` → `SOURCE_INVENTORIED` …
-`BASELINE_BUILT` walk, each with its checklist attached, and then step 7 of
-`../kernel/BUILD-PLAN.md`: boot the kernel and `insmod` the module. Nothing has
-been booted, loaded, or fuzzed.
+Note (F-41): the claim forwarded from this file's earlier revision — that Kbase
+contributed zero KCOV coverage — was a harness measurement artifact, since
+corrected; the verified coverage result is recorded in the
+`KBASE_LOAD_VERIFIED → KCOV_VERIFIED` row and F-41.
 
 ## State ladder
 
@@ -82,6 +74,21 @@ Append one row per transition. Do not edit or remove earlier rows.
 | 2026-10-01 | `NOT_STARTED` | `NOT_STARTED` → `NOT_STARTED` | new `qemu/scripts/package-artifact.sh`; package `baseline`; `verify-boot.sh --artifact` from `/tmp` **with `build/` renamed away**; `sha256sum -c` | **VERIFIED (F-22): `artifacts/baseline` = `PORTABLE_ARTIFACT_VERIFIED`** (68 MB, 16 files, identity `kbase-r54p0-01eac0-6.12.111-baseline`, integrity 16/16 OK). All 5 assertions pass from a relocated copy with no build tree present, so self-containment is demonstrated, not assumed. **Defect found and fixed by doing it:** `run.sh` resolved `bzImage` from the artifact but the **rootfs only from `build/rootfs/`**, so a relocated bundle stayed repo-dependent — rootfs now uses the same artifact-first candidate order. Scope class recorded separately as `DISCOVERY-ONLY` so portability is never misread as conformance | `analysis/findings.md` **F-22**, `artifacts/baseline/metadata/manifest.json`, `qemu/scripts/package-artifact.sh`, `research/boot-logs/20261001T093246Z-baseline-BOOT.log` |
 | 2026-10-01 | `NOT_STARTED` | `NOT_STARTED` → `NOT_STARTED` | `verify-boot.sh --profile kcov`, after teaching the rootfs KCOV's real ioctl+mmap protocol | **VERDICT: PASS** — all 5 assertions. First **quantitative coverage** in the project: `records=14495 distinct_pcs=2882` (range `0xffffffff8103d11d`–`0xffffffff812da9f5`, not truncated). **F-23: every PC is inside vmlinux's own text segment, so Kbase contributed ZERO coverage** — `mali_kbase.ko` is a module at `0xffffffffc0000000`+, ~2.4 GB above the highest PC seen. This closes F-2 by *measurement*: a coverage-guided fuzzer here would optimise kernel paths and score every Kbase input identically while appearing healthy. Four silent-failure traps in KCOV's userspace API are recorded in F-23 (ioctl not write; `INIT_TRACE` takes the size as the argument; one fd for the whole cycle; counters via mmap as a PC **list**, not a bitset — popcounting it gave a meaningless `656023`). Scope: DISCOVERY-ONLY | `analysis/findings.md` **F-23**, `research/boot-logs/20261001T102818Z-kcov-BOOT.log`, `qemu/rootfs/build-rootfs.sh` |
 | 2026-10-01 | `NOT_STARTED` | `NOT_STARTED` → `NOT_STARTED` | `package-artifact.sh --profile kcov`; `sha256sum -c` | **PACKAGED (not portable-tested):** `artifacts/kcov`, 80 MB, 16 files, integrity 16/16 OK, state `TARGET_VERIFIED`, scope `DISCOVERY-ONLY`. The clean-location test was run for `baseline` only | `artifacts/kcov/metadata/manifest.json` |
+| 2026-10-02 | `NOT_STARTED` | `NOT_STARTED` → `SOURCE_INVENTORIED` | formal checklist replay of `analysis/source-inventory.md` | PASS — archive checksum recorded (`vendor/arm/SHA256SUMS`), 441 files, `MALI_RELEASE_NAME` at `Kbuild:66`; release id r54p0-01eac0 | `analysis/source-inventory.md`, test-matrix E-001 |
+| 2026-10-02 | `SOURCE_INVENTORIED` | `SOURCE_INVENTORIED` → `KBASE_IDENTIFIED` | checklist replay of `analysis/kbase-version.md` | PASS — release id, licence (GPL-2.0), build systems (in-tree Kbuild / Android SCons) recorded | `analysis/kbase-version.md` |
+| 2026-10-02 | `KBASE_IDENTIFIED` | `KBASE_IDENTIFIED` → `PATCHES_VERIFIED` | checklist replay of `analysis/virtual-device.md` | PASS — per-patch applicability reproduced against pristine r54p0 (6/6, matrix); `apply-patches.sh` re-verified on 2026-10-02 run | `analysis/virtual-device.md`, test-matrix E-002 |
+| 2026-10-02 | `PATCHES_VERIFIED` | `PATCHES_VERIFIED` → `PROGRAM_SCOPE_VERIFIED` | checklist replay of `research/program-scope.md` + `research/documents/` | PASS — program page, configuration guidelines (v20250623-1.0), Kbase config and insmod allowlists captured; policy v1.1 | `research/program-scope.md`, test-matrix E-003 |
+| 2026-10-02 | `PROGRAM_SCOPE_VERIFIED` | `PROGRAM_SCOPE_VERIFIED` → `KERNEL_COMPATIBILITY_IDENTIFIED` | checklist replay of `analysis/kernel-compatibility.md` | PASS — gate range recorded (44/48 gates, max 6.13.0/6.18.0); Arm "latest ACK/LTS" guidance recorded; pin decided by build evidence (F-16/F-17/F-18) = 6.12.111 | `analysis/kernel-compatibility.md`, `kernel/sources/kernel.pin` |
+| 2026-10-02 | `KERNEL_COMPATIBILITY_IDENTIFIED` | `KERNEL_COMPATIBILITY_IDENTIFIED` → `MINIMAL_CONFIG_DRAFTED` | four profile fragments exist and have since been driven to built+verified | PASS — `kernel/configs/{baseline,kasan,kcov,debug}.config` | `kernel/configs/` |
+| 2026-10-02 | `MINIMAL_CONFIG_DRAFTED` | `MINIMAL_CONFIG_DRAFTED` → `BASELINE_BUILT` | `build.sh --profile baseline` (log kept) | PASS — 3,063 objects, `mali_kbase.ko` 2.4 MB + `bzImage` 13.6 MB, vermagic 6.12.111 (F-18) | `analysis/findings.md` F-18, `research/build-logs/` |
+| 2026-10-02 | `BASELINE_BUILT` | `BASELINE_BUILT` → `KCOV_BUILT` | `build.sh --profile kcov` | PASS — 16/16 fragment symbols (incl. `CONFIG_KCOV_ENABLE_COMPARISONS=y`, F-33 fix), `bzImage` 19.5 MB, `mali_kbase.ko` 4.0 MB | `build/kcov/build-metadata.txt` |
+| 2026-10-02 | `KCOV_BUILT` | `KCOV_BUILT` → `KASAN_BUILT` | `build.sh --profile kasan` (F-20/F-21 merge fixes applied) | PASS — `CONFIG_KASAN=y/GENERIC/INLINE` in effective config; `mali_kbase.ko` 5.1 MB | `build/logs/kasan.log`, test-matrix E-007 |
+| 2026-10-02 | `KASAN_BUILT` | `KASAN_BUILT` → `DEBUG_BUILT` | `build.sh --profile debug` | PASS — 16/16 fragment symbols, DWARF5 verified in the image via `readelf` (F-24 fix) | `build/logs/debug.log`, TODO P3 |
+| 2026-10-02 | `DEBUG_BUILT` | `DEBUG_BUILT` → `ROOTFS_BUILT` | `build-rootfs.sh` for all four profiles | PASS — `build/rootfs/rootfs-{baseline,kcov,kasan,debug}.cpio.gz` produced, contents verified by the boots below | `build/rootfs/` |
+| 2026-10-02 | `ROOTFS_BUILT` | `ROOTFS_BUILT` → `QEMU_BOOT_VERIFIED` | `verify-boot.sh` (7 assertions incl. negargs battery) for all four profiles | PASS — serial logs committed | `research/boot-logs/` |
+| 2026-10-02 | `QEMU_BOOT_VERIFIED` | `QEMU_BOOT_VERIFIED` → `KBASE_LOAD_VERIFIED` | `insmod mali_kbase.ko` rc=0; `Probed as mali0`; EL0 probe `passed=0x1ff failed=0x000` (F-19) | PASS | `analysis/findings.md` F-19, `research/boot-logs/*-baseline-BOOT.log` |
+| 2026-10-02 | `KBASE_LOAD_VERIFIED` | `KBASE_LOAD_VERIFIED` → `KCOV_VERIFIED` | `kcov-ctl --inline-probe`, module-range counting corrected for KASLR canonicalization | **PASS — `KCOV module_pcs=1678` distinct module PCs (records=596,005) from the 9-phase probe; windowed open+read independently shows module hits.** F-23's "module contributes zero" superseded by F-41 (harness measurement-defect chain F-33/F-36) | `analysis/findings.md` F-41, `qemu/target/kcov-ctl.c`, `research/boot-logs/20261002T055951Z-kcov-BOOT.log` |
+| 2026-10-02 | `KCOV_VERIFIED` | `KCOV_VERIFIED` → `PORTABLE_ARTIFACT_VERIFIED` | all four bundles re-packaged and relocation-booted with `--strict-artifact` from a clean location with the build tree inaccessible | PASS — 4× `PORTABLE_ARTIFACT_VERIFIED` (F-22 for baseline on 2026-10-01; kcov/kasan/debug on 2026-10-02; tiers B/C held throughout) | `artifacts/*/metadata/manifest.json`, `research/boot-logs/20261002T0435*Z-*-PORTABLE.log` |
 
 To record a transition:
 
@@ -96,14 +103,10 @@ Evidence:
 
 ## Notes on currently-satisfiable states
 
-The evidence gathered in this phase would appear to justify
-`SOURCE_INVENTORIED`, `KBASE_IDENTIFIED`, `PATCHES_VERIFIED`,
-`PROGRAM_SCOPE_VERIFIED`, and `KERNEL_COMPATIBILITY_IDENTIFIED`. They are **not
-marked reached** because §36 of the project spec requires a formal verification
-checklist per state, and this phase explicitly forbids the building/booting that
-the later states need. The evidence itself is recorded in `analysis/` and
-`research/`; promoting these states is a one-line change once the checklists are
-run and signed off, and is left to the next phase rather than assumed here.
+Nothing left open below `PORTABLE_ARTIFACT_VERIFIED`: every state through it
+now has a signed-off transition row (2026-10-02) with its evidence. The next
+states — `SYZKALLER_CONNECTED`, `FUZZING_STARTED` — are unexplored territory by
+design: they are the fuzzing phase, not the organisation phase.
 
 ## Resource constraints on future states
 
@@ -119,8 +122,13 @@ instead is the tooling to make that run reproducible elsewhere: `preflight.sh`
 (ran here read-only and correctly reported `NOT READY`), a pinned checksum-verified
 `fetch-kernel.sh`, `apply-patches.sh`, a shared `build.sh`, and `kernel/BUILD-PLAN.md`.
 
-**None of those scripts has run a build, and `fetch-kernel.sh` has performed no
-download** — the pin is still `UNSET`, so it refuses before any network call.
+The build-host deferral above was **resolved on 2026-10-01** by standing up a
+32 GB Codespace with `codespace-setup.sh` (kernel/BUILD-HOST.md; F-12), after
+which the entire ladder below was walked state-by-state (table above). The text
+in this section predates the walk and is kept because the scope constraints it
+states are still binding; the stale operational claims it used to carry
+("`fetch-kernel.sh` has performed no download", "the pin is still UNSET") have
+been removed rather than left to contradict the table.
 
 ## Scope constraints that shape every future state
 
@@ -139,7 +147,9 @@ sources in `research/program-scope.md` §8):
 - Dynamic configuration must use default module parameters; the permitted `insmod`
   override list is **truncated** in the available program text (UNKNOWN).
 
-None of this changes `NOT_STARTED`; it constrains how these states may be entered.
+These constraints remain binding at `PORTABLE_ARTIFACT_VERIFIED` and are exactly
+why `SYZKALLER_CONNECTED` and `FUZZING_STARTED` were not entered: both would be
+discovery-phase milestones over this harness, and they have not been reached.
 
 On the build host, expect to build one profile, package it, record its checksum,
 then delete the build tree before the next — the `one source tree / many O=

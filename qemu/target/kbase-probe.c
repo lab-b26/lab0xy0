@@ -92,7 +92,7 @@ static void phase(const char *name, int ok, unsigned int bit)
 	}
 }
 
-int main(void)
+int kbase_probe_run(void)
 {
 	int fd = -1;
 	int rc;
@@ -324,3 +324,17 @@ out:
 	       failed);
 	return (int)(passed | failed);
 }
+
+#ifndef KBASE_PROBE_NO_MAIN
+/*
+ * Standalone entry point. When linked into kcov-ctl (-DKBASE_PROBE_NO_MAIN)
+ * the probe body is called directly as kbase_probe_run() IN THE TRACED TASK:
+ * kcov task-mode coverage is reset across fork() (kernel/fork.c calls
+ * kcov_task_init/kcov_task_reset), so a forked child is never traced. See
+ * build-rootfs.sh and analysis/findings.md F-36.
+ */
+int main(void)
+{
+	return kbase_probe_run();
+}
+#endif

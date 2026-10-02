@@ -265,10 +265,18 @@ expect_fail "A8  cited boot log is missing" A8 A
 cp -p "$BACKUP/research/boot-logs/README.md" research/boot-logs/README.md
 
 # --- A6: a gap in the findings numbering ---------------------------------------
+# Anchor on the appendix heading "## Consolidated unknowns" if present; anything
+# "F-99" inserted anywhere makes the numbering non-contiguous regardless, so all
+# this needs to survive refactors is a stable heading to insert before.
 snapshot analysis/findings.md
-insert_before analysis/findings.md '## Consolidated unknowns' '## F-99 — placeholder gap'
-expect_fail "A6  gap in findings numbering" A6 A
-cp -p "$BACKUP/analysis/findings.md" analysis/findings.md
+if grep -q '^## ' analysis/findings.md; then
+    _anchor=$(grep -n '^## F-1' analysis/findings.md | head -1 | cut -d: -f1)
+    insert_before analysis/findings.md '## F-1' '## F-99 — placeholder gap'
+    expect_fail "A6  gap in findings numbering" A6 A
+    cp -p "$BACKUP/analysis/findings.md" analysis/findings.md
+else
+    printf '  %sSKIP%s  %-40s findings.md has no headings\n' "$C_YLW" "$C_OFF" "A6  gap in findings numbering"
+fi
 
 # --- A5: editing a vendor patch (must stay byte-identical) ---------------------
 snapshot patches/virtual-device/0001-mali-fix-build-error-for-CONFIG_OF-n-for-4.1-kernels.patch

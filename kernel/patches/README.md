@@ -20,6 +20,7 @@ versioned with their own rationale.
 | Patch | Problem it fixes | Category | Validated on |
 |---|---|---|---|
 | `0001-kbase-guard-clk-is-enabled-behind-COMMON_CLK.patch` | `__clk_is_enabled` is declared unconditionally but defined only under `CONFIG_COMMON_CLK`, so the module compiles and then fails to link on x86_64 (F-17) | **build fix** (not a behaviour change) | Linux 6.12.111, x86_64, gcc 13.3.0 |
+| `0002-kbase-kbuild-kcov-instrument-modules.patch` | `MALI_KCOV` exists only in the Android/SCons `Mconfig`/`Makefile`, so the SCons coverage flags never reached in-tree builds (F-2). Measured: `INSTRUMENT_ALL` already covers modules (F-41), so the patch is retained as belt-and-braces for targeted-instrumentation configs (`INSTRUMENT_ALL=n`); requires `CONFIG_KCOV_ENABLE_COMPARISONS=y` in the kcov fragment | **instrumentation** (discovery-profile only; not a behaviour change) | applied on r54p0 + six vendor patches + 0001; Kbase coverage VERIFIED (`KCOV module_pcs=1678`, F-41) |
 
 `apply-patches.sh` applies these automatically, **after** the six vendor
 patches, from `driver/` with `patch -p1` — the same mechanism and the same
@@ -57,20 +58,30 @@ labelled a build fix — it changes no behaviour in either configuration:
   `kbdev->clocks[]` is never populated, so the guarded and unguarded forms are
   equivalent.
 
-## The one patch this project already knows it will need (still unwritten)
+## The Kbase-side KCOV instrumentation patch (0002)
 
-**Kbase-side KCOV instrumentation.** VERIFIED: `MALI_KCOV` exists only in
-`midgard/Mconfig` (the Android/SCons path), not in `midgard/Kconfig`, and its
-`-fsanitize-coverage=trace-cmp` flags live only in the SCons/Android `Makefile`
-an in-tree build never reads. Consequence (INFERRED): an in-tree build yields a
-Kbase module with no Kbase-side coverage instrumentation, regardless of
-`CONFIG_MALI_KCOV`. See `../../analysis/findings.md` **F-2**.
+**Status: applied in staged builds (F-39 fixed the staging so it actually
+reaches the compiler); effect measured — coverage of Kbase is VERIFIED. The
+patch turned out to be belt-and-braces, not the load-bearing piece:**
+`CONFIG_KCOV_INSTRUMENT_ALL=y` already instruments module objects
+(`scripts/Makefile.lib`: `is-kernel-object` includes modules), so the module
+carried sancov callbacks in every kcov-profile build. The "no Kbase coverage"
+outcome was a chain of harness measurement defects (F-33/F-36/F-41), not a
+build property. The patch is retained deliberately: it pins
+`KCOV_INSTRUMENT := y` for midgard under `CONFIG_KCOV`, which is what a future
+targeted-instrumentation profile (`INSTRUMENT_ALL=n`) would need.
 
-The preferred fix is a `Kbuild` condition in this directory that appends
-`-fsanitize-coverage=trace-cmp` for the coverage profile — it keeps the change in
-the research-patch category and leaves vendor source untouched. Writing this
-patch is a build-phase task, and its effect must be confirmed by observing actual
-coverage from Kbase code (state `KCOV_VERIFIED`), not assumed from the diff.
+`MALI_KCOV` exists only in `midgard/Mconfig` (the Android/SCons path), not in
+`midgard/Kconfig`, and its `-fsanitize-coverage=trace-cmp` flags live only in
+the SCons/Android `Makefile` an in-tree build never reads (F-2 — the static
+observation remains true). Its feared consequence (no Kbase coverage) is
+disproven by measurement (F-41).
+
+The kcov fragment must set `CONFIG_KCOV_ENABLE_COMPARISONS=y`, or objects
+compiled with `-fsanitize-coverage=trace-cmp` reference
+`__sanitizer_cov_trace_cmp*` symbols that `kernel/kcov.c` compiles out — a
+modpost `undefined!` failure. That invariant is now enforced by build.sh's
+step-5 fragment verification.
 
 ## Requirements for any patch added here
 

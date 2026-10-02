@@ -20,15 +20,21 @@ It is not a general-purpose userland. A full desktop or server distribution woul
 waste the disk and boot time this host cannot afford, and would add attack surface
 irrelevant to the Kbase target.
 
-## Contents (planned)
+## Contents (as built)
 
 Only what the above requires:
 
-- a tiny init (`/init` or equivalent) and a shell for interactive debugging;
-- `/dev/mali0` handling and the ioctl surface Kbase exposes;
-- tools to load the Kbase module and read dmesg/serial output;
-- whatever the fuzzer needs on the control channel;
-- CA certificates / static binaries only if the fuzzer requires them.
+- a non-interactive init (`/init`) that mounts the filesystems, loads
+  `mali_kbase.ko`, runs the probe/negargs batteries and (kcov profile) the
+  coverage measurement, then powers off;
+- busybox (static) for the shell and core utilities;
+- `kbase-probe` (happy-path EL0 exerciser) and `kbase-negargs`
+  (rejection-battery for malformed ioctls) from `qemu/target/`;
+- `kcov-ctl` (coverage measurement; in-process probing, frozen counters,
+  KASLR-slide-aware module bucketing) from `qemu/target/kcov-ctl.c`;
+- the profile's `mali_kbase.ko` in `/lib/modules/`;
+- a fuzzer-facing control channel (dropbear/ssh) is planned as a
+  fuzzing-profile variant (syzkaller phase), not part of the validation image.
 
 Everything else (package managers, compilers, desktop, docs) is deliberately
 omitted.

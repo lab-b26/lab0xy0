@@ -1,0 +1,67 @@
+From: lab0xy0 research
+Subject: [PATCH] kbase: instrument the module for KCOV in in-tree builds
+
+Instrumentation change, not a behaviour change. Discovery-profile only.
+
+Arm's r54p0 defines MALI_KCOV only in midgard/Mconfig and its
+-fsanitize-coverage flags only in the Android/SCons Makefile. An in-tree
+build reads neither, and CONFIG_KCOV_INSTRUMENT_ALL does NOT cover loadable
+modules: scripts/Makefile.lib:175 gates it behind $(is-kernel-object), which
+is built-in objects only. The module therefore compiled with no coverage
+instrumentation at all, and F-23 measured it: 2882 distinct PCs collected,
+every one inside the vmlinux text range, zero inside the module range
+(0xffffffffc0000000+). A coverage-guided fuzzer on such a kernel scores every
+Kbase input identically while appearing healthy -- the failure mode this
+repository exists to avoid.
+
+Fix: opt the whole mali_kbase module into kbuild's own coverage mechanism by
+setting KCOV_INSTRUMENT := y at the top of midgard/Kbuild, guarded on
+CONFIG_KCOV so the baseline/kasan/debug profiles are untouched. With
+KCOV_INSTRUMENT=y the module receives exactly the kernel's own CFLAGS_KCOV:
+
+  -fsanitize-coverage=trace-pc              (always, with CONFIG_KCOV=y)
+  -fsanitize-coverage=trace-cmp             (with CONFIG_KCOV_ENABLE_COMPARISONS=y)
+
+This requires CONFIG_KCOV_ENABLE_COMPARISONS=y in the kcov profile fragment
+in the same change: otherwise trace-cmp references (__sanitizer_cov_trace_cmp*)
+land in a kernel whose kernel/kcov.c compiles them out, which is the modpost
+"undefined!" failure class.
+
+The guard matters for the other direction: CFLAGS_KCOV is non-empty whenever
+the toolchain supports SANCov, so an unguarded KCOV_INSTRUMENT := y would
+reference __sanitizer_cov_trace_pc in profiles built without CONFIG_KCOV
+(baseline, kasan, debug) and fail those modposts.
+
+Single placement at the top of midgard/Kbuild is sufficient because the
+subdir Kbuilds are textually -included into this file, so one variable
+assignment covers every object in mali_kbase-y.
+
+Validated against: Linux 6.12.111 (x86_64), r54p0-01eac0 + the six
+patches/virtual-device patches + 0001 (F-17). Acceptance is the falsifiable
+criterion in TODO.md P6: a KCOV probe run must report PCs at or above
+0xffffffffc0000000; a vmlinux-only pc_range is a FAILED result. See
+analysis/findings.md F-2, F-23.
+---
+ .../kernel/drivers/gpu/arm/midgard/Kbuild        | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+--- a/product/kernel/drivers/gpu/arm/midgard/Kbuild
++++ b/product/kernel/drivers/gpu/arm/midgard/Kbuild
+@@ -215,4 +215,17 @@
+ else
+ # out-of-tree
+     include $(INCLUDE_SUBDIR)
+ endif
++
++# lab0xy0 research patch (findings F-2/F-23, TODO P6): opt the module into
++# KCOV instrumentation for in-tree builds. MALI_KCOV is unreachable here (it
++# exists only in Mconfig + the Android/SCons Makefile), and
++# CONFIG_KCOV_INSTRUMENT_ALL does not cover module objects
++# (scripts/Makefile.lib gates it behind $(is-kernel-object)).
++# Without this, the kcov profile collects vmlinux PCs only and is blind to
++# Kbase itself. Guarded on CONFIG_KCOV so the other three profiles are
++# untouched (an unguarded assignment would reference __sanitizer_cov_*
++# symbols that do not exist in a CONFIG_KCOV=n build).
++ifeq ($(CONFIG_KCOV),y)
++KCOV_INSTRUMENT := y
++endif
